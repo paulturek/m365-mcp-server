@@ -8,12 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY pyproject.toml .
+# Copy project files (README.md required for hatchling metadata)
+COPY pyproject.toml README.md ./
 COPY src/ src/
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
