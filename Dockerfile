@@ -22,4 +22,8 @@ RUN useradd --create-home --shell /bin/bash appuser && \
 
 USER appuser
 
-CMD ["python", "-m", "m365_mcp_server"]
+# Expose port for Railway
+EXPOSE 8000
+
+# Run the MCP server (auto-detects Railway vs local)
+CMD ["python", "-m", "m365_mcp"]
