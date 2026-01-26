@@ -25,7 +25,7 @@ try:
 except ImportError:
     HTTP_AVAILABLE = False
 
-from .config import get_config
+from .config import config, M365Config
 from .auth.token_manager import TokenManager
 from .clients.graph_client import GraphClient, AuthenticationRequiredError
 from .clients.powerbi_client import PowerBIClient
@@ -45,8 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global instances
-config = get_config()
+# Global instances - use imported config directly
 token_manager: Optional[TokenManager] = None
 graph_client: Optional[GraphClient] = None
 powerbi_client: Optional[PowerBIClient] = None
