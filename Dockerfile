@@ -25,5 +25,6 @@ USER appuser
 # Expose port for Railway
 EXPOSE 8000
 
+# Force fresh build - v2
 # Run the MCP server (auto-detects Railway vs local)
 CMD ["python", "-m", "m365_mcp"]
