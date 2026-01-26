@@ -1,6 +1,7 @@
 """M365 MCP Server entry point.
 
-Runs the MCP server with HTTP transport for Railway deployment.
+Runs the MCP server with HTTP/SSE transport for Railway deployment.
+Supports bearer token authentication via MCP_BEARER_TOKEN env var.
 Exposes /health endpoint for healthchecks.
 """
 
@@ -8,22 +9,19 @@ import asyncio
 import logging
 import os
 import sys
-from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
 
-try:
-    from starlette.applications import Starlette
-    from starlette.responses import JSONResponse
-    from starlette.routing import Route
-    import uvicorn
-    HTTP_AVAILABLE = True
-except ImportError:
-    HTTP_AVAILABLE = False
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route, Mount
+from starlette.requests import Request
+import uvicorn
 
 from .config import config, M365Config
 from .auth.token_manager import TokenManager
@@ -425,10 +423,25 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
 
 
 # =============================================================================
-# HTTP Server for Railway (with health endpoint)
+# HTTP Server for Railway (with health endpoint and MCP SSE transport)
 # =============================================================================
 
-async def health_check(request):
+def check_bearer_token(request: Request) -> bool:
+    """Validate bearer token from Authorization header."""
+    expected_token = os.environ.get("MCP_BEARER_TOKEN")
+    if not expected_token:
+        logger.warning("MCP_BEARER_TOKEN not configured")
+        return False
+    
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    
+    provided_token = auth_header[7:]  # Strip "Bearer " prefix
+    return provided_token == expected_token
+
+
+async def health_check(request: Request) -> Response:
     """Health check endpoint for Railway."""
     return JSONResponse({
         "status": "healthy",
@@ -437,22 +450,62 @@ async def health_check(request):
     })
 
 
-async def status_check(request):
+async def status_check(request: Request) -> Response:
     """Status endpoint with more detail."""
     auth_status = "authenticated" if (token_manager and token_manager.get_graph_token()) else "not_authenticated"
     return JSONResponse({
         "status": "running",
         "auth_status": auth_status,
         "services": ["outlook", "onedrive", "sharepoint", "excel", "teams", "powerbi"],
+        "mcp_endpoints": {
+            "sse": "/sse",
+            "messages": "/messages",
+        },
     })
 
 
-def create_http_app():
-    """Create Starlette app with health endpoints."""
+# SSE transport for MCP
+sse_transport = SseServerTransport("/messages")
+
+
+async def handle_sse(request: Request) -> Response:
+    """Handle SSE connection for MCP with bearer token auth."""
+    if not check_bearer_token(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    logger.info("New MCP SSE connection established")
+    
+    async with sse_transport.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await server.run(
+            streams[0],
+            streams[1],
+            server.create_initialization_options(),
+        )
+    
+    return Response()
+
+
+async def handle_messages(request: Request) -> Response:
+    """Handle MCP messages with bearer token auth."""
+    if not check_bearer_token(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    return await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+
+
+def create_http_app() -> Starlette:
+    """Create Starlette app with health endpoints and MCP SSE transport."""
     routes = [
+        # Health/status endpoints (no auth required)
         Route("/health", health_check, methods=["GET"]),
         Route("/status", status_check, methods=["GET"]),
         Route("/", health_check, methods=["GET"]),
+        
+        # MCP SSE transport endpoints (bearer auth required)
+        Route("/sse", handle_sse, methods=["GET"]),
+        Route("/messages", handle_messages, methods=["POST"]),
     ]
     return Starlette(routes=routes)
 
@@ -461,7 +514,7 @@ def create_http_app():
 # Main Entry Points
 # =============================================================================
 
-async def run_stdio():
+async def run_stdio() -> None:
     """Run MCP server with stdio transport (for local use)."""
     initialize_services()
     async with stdio_server() as (read_stream, write_stream):
@@ -472,18 +525,22 @@ async def run_stdio():
         )
 
 
-def run_http():
+def run_http() -> None:
     """Run HTTP server for Railway deployment."""
-    if not HTTP_AVAILABLE:
-        logger.error("HTTP dependencies not available. Install uvicorn and starlette.")
-        sys.exit(1)
-    
     initialize_services()
     
     port = int(os.environ.get("PORT", 8000))
     host = os.environ.get("HOST", "0.0.0.0")
     
+    # Check for bearer token configuration
+    if os.environ.get("MCP_BEARER_TOKEN"):
+        logger.info("MCP_BEARER_TOKEN configured - MCP endpoints protected")
+    else:
+        logger.warning("MCP_BEARER_TOKEN not set - MCP endpoints will reject all requests")
+    
     logger.info(f"Starting HTTP server on {host}:{port}")
+    logger.info(f"MCP SSE endpoint: /sse")
+    logger.info(f"MCP messages endpoint: /messages")
     
     app = create_http_app()
     uvicorn.run(app, host=host, port=port, log_level="info")
