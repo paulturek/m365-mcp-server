@@ -7,6 +7,7 @@ Supports both:
 
 Requires bearer token authentication via MCP_BEARER_TOKEN env var.
 Exposes /health endpoint for healthchecks.
+Exposes /auth/device-code for initial authentication.
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -61,6 +63,15 @@ excel: Optional[ExcelService] = None
 office_docs: Optional[OfficeDocsService] = None
 teams: Optional[TeamsService] = None
 powerbi: Optional[PowerBIService] = None
+
+# Device code flow state
+_device_flow_state = {
+    "active": False,
+    "info": None,
+    "result": None,
+    "error": None,
+}
+_device_flow_lock = threading.Lock()
 
 
 def initialize_services() -> None:
@@ -428,6 +439,205 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
 
 
 # =============================================================================
+# Device Code Authentication Flow
+# =============================================================================
+
+def _run_device_code_flow_background():
+    """Run device code flow in background thread."""
+    global _device_flow_state
+    
+    def callback(info):
+        with _device_flow_lock:
+            _device_flow_state["info"] = info
+        # Log to Railway logs
+        logger.info("=" * 60)
+        logger.info("DEVICE CODE AUTHENTICATION REQUIRED")
+        logger.info("=" * 60)
+        logger.info(info.get("message", ""))
+        logger.info("=" * 60)
+    
+    def run():
+        global _device_flow_state
+        try:
+            with _device_flow_lock:
+                _device_flow_state["active"] = True
+                _device_flow_state["error"] = None
+            
+            result = token_manager.authenticate_device_code(callback=callback)
+            
+            with _device_flow_lock:
+                _device_flow_state["result"] = result
+                _device_flow_state["active"] = False
+            
+            if "refresh_token" in result:
+                logger.info("=" * 60)
+                logger.info("AUTHENTICATION SUCCESSFUL!")
+                logger.info("=" * 60)
+                logger.info("Add this to Railway environment variables for persistence:")
+                logger.info(f"M365_REFRESH_TOKEN={result['refresh_token']}")
+                logger.info("=" * 60)
+            else:
+                error = result.get("error_description", result.get("error", "Unknown error"))
+                logger.error(f"Device code auth failed: {error}")
+                with _device_flow_lock:
+                    _device_flow_state["error"] = error
+                    
+        except Exception as e:
+            logger.exception("Device code flow error")
+            with _device_flow_lock:
+                _device_flow_state["error"] = str(e)
+                _device_flow_state["active"] = False
+    
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+
+async def handle_device_code_start(request: Request) -> Response:
+    """Start device code authentication flow.
+    
+    GET /auth/device-code - Start flow and return device code info
+    """
+    # Check if already authenticated
+    if token_manager and token_manager.is_authenticated():
+        return JSONResponse({
+            "status": "authenticated",
+            "message": "Already authenticated. Use /auth/logout to re-authenticate.",
+            "account": token_manager.get_current_account(),
+        })
+    
+    # Check if flow already active
+    with _device_flow_lock:
+        if _device_flow_state["active"]:
+            return JSONResponse({
+                "status": "pending",
+                "message": "Device code flow already in progress",
+                "device_code_info": _device_flow_state["info"],
+            })
+        
+        # Check if we have a result from previous flow
+        if _device_flow_state["result"]:
+            if "access_token" in _device_flow_state["result"]:
+                return JSONResponse({
+                    "status": "completed",
+                    "message": "Authentication completed. Refresh the page or call /auth/status.",
+                })
+    
+    # Start new flow
+    _run_device_code_flow_background()
+    
+    # Wait briefly for flow to initialize
+    await asyncio.sleep(2)
+    
+    with _device_flow_lock:
+        info = _device_flow_state["info"]
+    
+    if info:
+        return JSONResponse({
+            "status": "pending",
+            "message": "Device code flow started. Follow the instructions below.",
+            "device_code_info": info,
+            "instructions": [
+                f"1. Go to: {info.get('verification_uri', 'https://microsoft.com/devicelogin')}",
+                f"2. Enter code: {info.get('user_code', 'N/A')}",
+                "3. Sign in with your Microsoft account",
+                "4. Return here to verify authentication",
+            ],
+        })
+    
+    return JSONResponse({
+        "status": "starting",
+        "message": "Device code flow starting... Refresh in a few seconds.",
+    })
+
+
+async def handle_auth_status(request: Request) -> Response:
+    """Check authentication status.
+    
+    GET /auth/status
+    """
+    if token_manager and token_manager.is_authenticated():
+        account = token_manager.get_current_account()
+        return JSONResponse({
+            "status": "authenticated",
+            "account": {
+                "username": account.get("username") if account else None,
+            } if account else None,
+        })
+    
+    with _device_flow_lock:
+        if _device_flow_state["active"]:
+            return JSONResponse({
+                "status": "pending",
+                "message": "Device code flow in progress",
+                "device_code_info": _device_flow_state["info"],
+            })
+        
+        if _device_flow_state["error"]:
+            return JSONResponse({
+                "status": "error",
+                "error": _device_flow_state["error"],
+            })
+    
+    return JSONResponse({
+        "status": "not_authenticated",
+        "message": "Not authenticated. Visit /auth/device-code to start authentication.",
+    })
+
+
+async def handle_auth_logout(request: Request) -> Response:
+    """Logout and clear tokens.
+    
+    POST /auth/logout
+    """
+    global _device_flow_state
+    
+    if token_manager:
+        token_manager.logout()
+    
+    with _device_flow_lock:
+        _device_flow_state = {
+            "active": False,
+            "info": None,
+            "result": None,
+            "error": None,
+        }
+    
+    return JSONResponse({
+        "status": "logged_out",
+        "message": "Tokens cleared. Visit /auth/device-code to re-authenticate.",
+    })
+
+
+async def handle_auth_refresh_token(request: Request) -> Response:
+    """Get current refresh token for manual backup.
+    
+    GET /auth/refresh-token
+    
+    Returns the current refresh token so you can save it to M365_REFRESH_TOKEN.
+    Requires bearer auth.
+    """
+    if not check_bearer_token(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if not token_manager:
+        return JSONResponse({"error": "Token manager not initialized"}, status_code=500)
+    
+    refresh_token = token_manager.get_current_refresh_token()
+    
+    if refresh_token:
+        return JSONResponse({
+            "status": "success",
+            "message": "Copy this to Railway M365_REFRESH_TOKEN env var",
+            "refresh_token": refresh_token,
+        })
+    
+    return JSONResponse({
+        "status": "not_available",
+        "message": "No refresh token available. Authenticate first via /auth/device-code",
+    })
+
+
+# =============================================================================
 # HTTP Server with Streamable HTTP Transport (Modern) + Legacy SSE
 # =============================================================================
 
@@ -466,6 +676,12 @@ async def status_check(request: Request) -> Response:
             "streamable_http": "/mcp",
             "legacy_sse": "/sse",
             "legacy_messages": "/messages",
+        },
+        "auth_endpoints": {
+            "device_code": "/auth/device-code",
+            "status": "/auth/status",
+            "logout": "/auth/logout",
+            "refresh_token": "/auth/refresh-token",
         },
     })
 
@@ -743,6 +959,12 @@ def create_http_app() -> Starlette:
         Route("/status", status_check, methods=["GET"]),
         Route("/", health_check, methods=["GET"]),
         
+        # Auth endpoints (no bearer auth required for device code flow)
+        Route("/auth/device-code", handle_device_code_start, methods=["GET"]),
+        Route("/auth/status", handle_auth_status, methods=["GET"]),
+        Route("/auth/logout", handle_auth_logout, methods=["POST"]),
+        Route("/auth/refresh-token", handle_auth_refresh_token, methods=["GET"]),
+        
         # Streamable HTTP transport (modern - recommended)
         Route("/mcp", handle_mcp_request, methods=["GET", "POST"]),
         
@@ -785,6 +1007,7 @@ def run_http() -> None:
     logger.info(f"Streamable HTTP endpoint: /mcp (modern)")
     logger.info(f"Legacy SSE endpoint: /sse")
     logger.info(f"Legacy messages endpoint: /messages")
+    logger.info(f"Auth endpoint: /auth/device-code")
     
     app = create_http_app()
     uvicorn.run(app, host=host, port=port, log_level="info")
