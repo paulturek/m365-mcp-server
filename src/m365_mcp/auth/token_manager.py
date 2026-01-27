@@ -23,6 +23,11 @@ Note on MSAL Application Types:
     Device code flow ONLY works with PublicClientApplication, so we maintain
     both types when client_secret is provided.
 
+Note on Scopes:
+    MSAL automatically handles reserved scopes (offline_access, openid, profile).
+    Do NOT include these in scope lists passed to initiate_device_flow() or
+    acquire_token methods - MSAL will raise ValueError.
+
 """
 
 import logging
@@ -35,6 +40,9 @@ from ..config import M365Config
 from .token_cache import EncryptedTokenCache
 
 logger = logging.getLogger(__name__)
+
+# Scopes that MSAL handles automatically - never include in requests
+RESERVED_SCOPES = {"offline_access", "openid", "profile"}
 
 
 class TokenManager:
@@ -112,6 +120,25 @@ class TokenManager:
         # This enables token persistence across Railway deploys
         self._bootstrap_from_env_refresh_token()
     
+    @staticmethod
+    def _filter_reserved_scopes(scopes: list[str]) -> list[str]:
+        """Remove reserved scopes that MSAL handles automatically.
+        
+        MSAL raises ValueError if you include offline_access, openid, or profile
+        in scope lists. These are handled internally by MSAL.
+        
+        Args:
+            scopes: List of OAuth scopes
+            
+        Returns:
+            Filtered list without reserved scopes
+        """
+        filtered = [s for s in scopes if s.lower() not in RESERVED_SCOPES]
+        removed = set(scopes) - set(filtered)
+        if removed:
+            logger.debug(f"Filtered reserved scopes: {removed}")
+        return filtered
+    
     def _bootstrap_from_env_refresh_token(self) -> None:
         """Bootstrap MSAL cache from M365_REFRESH_TOKEN env var.
         
@@ -133,12 +160,15 @@ class TokenManager:
         
         logger.info("Bootstrapping from M365_REFRESH_TOKEN environment variable...")
         
+        # Filter out reserved scopes before making the request
+        scopes = self._filter_reserved_scopes(self.config.graph_scopes)
+        
         # Use the refresh token to acquire new tokens
         # This populates the MSAL cache with the account and tokens
         try:
             result = self.app.acquire_token_by_refresh_token(
                 refresh_token=refresh_token,
-                scopes=self.config.graph_scopes,
+                scopes=scopes,
             )
             
             if "access_token" in result:
@@ -211,9 +241,12 @@ class TokenManager:
             logger.debug("No cached accounts found")
             return None
         
+        # Filter reserved scopes
+        filtered_scopes = self._filter_reserved_scopes(scopes)
+        
         # Try silent acquisition (uses refresh token if needed)
         result = self.app.acquire_token_silent(
-            scopes=scopes,
+            scopes=filtered_scopes,
             account=accounts[0],
         )
         
@@ -267,9 +300,15 @@ class TokenManager:
         """
         scopes = scopes or self.config.graph_scopes
         
+        # CRITICAL: Filter out reserved scopes (offline_access, openid, profile)
+        # MSAL handles these automatically and raises ValueError if included
+        filtered_scopes = self._filter_reserved_scopes(scopes)
+        
+        logger.info(f"Initiating device flow with scopes: {filtered_scopes}")
+        
         # IMPORTANT: Device code flow ONLY works with PublicClientApplication
         # ConfidentialClientApplication does NOT have initiate_device_flow method
-        flow = self.public_app.initiate_device_flow(scopes=scopes)
+        flow = self.public_app.initiate_device_flow(scopes=filtered_scopes)
         
         if "user_code" not in flow:
             error_msg = flow.get("error_description", "Unknown error")
