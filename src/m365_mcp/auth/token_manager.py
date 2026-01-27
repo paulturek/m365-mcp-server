@@ -5,16 +5,19 @@ This module provides the TokenManager class that handles:
 - Silent token acquisition with automatic refresh
 - Separate token management for Graph API and Power BI API
 - Environment variable-based refresh token for Railway deployment
+- Automatic persistence of refresh token to Railway env vars
 
 Token Lifecycle:
-    1. User authenticates via device code flow
-    2. Access token (~1 hour) and refresh token (~90 days) cached
-    3. On subsequent calls, MSAL automatically refreshes if needed
-    4. Refresh tokens extended on each use
+    1. User authenticates via device code flow (once)
+    2. Refresh token automatically saved to Railway env var
+    3. Access token (~1 hour) and refresh token (~90 days) cached
+    4. On subsequent calls/deploys, MSAL automatically refreshes if needed
+    5. Refresh tokens extended on each use
 
 Railway Deployment:
-    Set M365_REFRESH_TOKEN env var to persist auth across deploys.
-    The refresh token is used to bootstrap the MSAL cache on startup.
+    Set RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID env vars to enable
+    automatic persistence of refresh tokens across deploys.
+    The M365_REFRESH_TOKEN env var is updated automatically after auth.
 
 Note on MSAL Application Types:
     - ConfidentialClientApplication: Has client_secret, used for token refresh
@@ -35,6 +38,7 @@ import os
 from typing import Any, Callable, Optional
 
 import msal
+import httpx
 
 from ..config import M365Config
 from .token_cache import EncryptedTokenCache
@@ -44,6 +48,9 @@ logger = logging.getLogger(__name__)
 # Scopes that MSAL handles automatically - never include in requests
 RESERVED_SCOPES = {"offline_access", "openid", "profile"}
 
+# Railway API endpoint
+RAILWAY_API_URL = "https://backboard.railway.app/graphql/v2"
+
 
 class TokenManager:
     """Manages M365 authentication using MSAL.
@@ -51,8 +58,8 @@ class TokenManager:
     Handles OAuth 2.0 authentication flows and automatic token refresh.
     Supports both Microsoft Graph API and Power BI API tokens.
     
-    Supports M365_REFRESH_TOKEN env var for Railway deployment where
-    the token cache is ephemeral.
+    Automatically persists refresh tokens to Railway env vars for
+    seamless authentication across deploys.
     
     Attributes:
         config: M365 configuration instance
@@ -139,6 +146,68 @@ class TokenManager:
             logger.debug(f"Filtered reserved scopes: {removed}")
         return filtered
     
+    def _save_refresh_token_to_railway(self, refresh_token: str) -> bool:
+        """Save refresh token to Railway environment variable.
+        
+        Uses Railway API to update M365_REFRESH_TOKEN env var so the
+        token persists across deploys.
+        
+        Args:
+            refresh_token: The refresh token to save
+            
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        api_token = os.environ.get("RAILWAY_API_TOKEN")
+        service_id = os.environ.get("RAILWAY_SERVICE_ID")
+        
+        if not api_token or not service_id:
+            logger.warning(
+                "RAILWAY_API_TOKEN or RAILWAY_SERVICE_ID not set. "
+                "Refresh token will not be persisted to Railway env vars. "
+                "Set these to enable automatic token persistence."
+            )
+            return False
+        
+        # GraphQL mutation to upsert environment variable
+        query = """
+        mutation VariableUpsert($input: VariableUpsertInput!) {
+            variableUpsert(input: $input)
+        }
+        """
+        
+        variables = {
+            "input": {
+                "serviceId": service_id,
+                "name": "M365_REFRESH_TOKEN",
+                "value": refresh_token,
+            }
+        }
+        
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(
+                    RAILWAY_API_URL,
+                    json={"query": query, "variables": variables},
+                    headers={
+                        "Authorization": f"Bearer {api_token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                if "errors" in result:
+                    logger.error(f"Railway API error: {result['errors']}")
+                    return False
+                
+                logger.info("Successfully saved refresh token to Railway M365_REFRESH_TOKEN env var")
+                return True
+                
+        except Exception as e:
+            logger.exception(f"Failed to save refresh token to Railway: {e}")
+            return False
+    
     def _bootstrap_from_env_refresh_token(self) -> None:
         """Bootstrap MSAL cache from M365_REFRESH_TOKEN env var.
         
@@ -174,17 +243,11 @@ class TokenManager:
             if "access_token" in result:
                 logger.info("Successfully bootstrapped auth from M365_REFRESH_TOKEN")
                 
-                # Log the new refresh token if it changed (for manual update)
+                # If token was rotated, save the new one to Railway
                 new_refresh_token = result.get("refresh_token")
                 if new_refresh_token and new_refresh_token != refresh_token:
-                    logger.info(
-                        "Refresh token was rotated. Consider updating M365_REFRESH_TOKEN "
-                        "env var with the new value for extended validity."
-                    )
-                    # Log first/last few chars for identification (not the full token)
-                    logger.debug(
-                        f"New refresh token: {new_refresh_token[:10]}...{new_refresh_token[-10:]}"
-                    )
+                    logger.info("Refresh token was rotated, saving new token to Railway...")
+                    self._save_refresh_token_to_railway(new_refresh_token)
             else:
                 error = result.get("error", "unknown_error")
                 error_desc = result.get("error_description", "No description")
@@ -193,7 +256,7 @@ class TokenManager:
                 if "invalid_grant" in error or "expired" in error_desc.lower():
                     logger.error(
                         "The M365_REFRESH_TOKEN has expired or been revoked. "
-                        "You need to re-authenticate and obtain a new refresh token."
+                        "User needs to re-authenticate via device code flow."
                     )
                     
         except Exception as e:
@@ -273,6 +336,9 @@ class TokenManager:
         you can't open a browser directly. User visits a URL and enters
         a code to complete authentication.
         
+        After successful authentication, the refresh token is automatically
+        saved to Railway env var for persistence across deploys.
+        
         NOTE: Device code flow requires PublicClientApplication, not
         ConfidentialClientApplication. This method uses self.public_app.
         
@@ -285,18 +351,12 @@ class TokenManager:
         Returns:
             MSAL token result dict. Contains 'access_token' on success,
             or 'error' and 'error_description' on failure.
-            
-            IMPORTANT: If you need to persist auth across Railway deploys,
-            save the 'refresh_token' from this result as M365_REFRESH_TOKEN
-            environment variable.
         
         Example:
             >>> def show_code(info):
             ...     print(f"Go to {info['verification_uri']}")
             ...     print(f"Enter code: {info['user_code']}")
             >>> result = manager.authenticate_device_code(callback=show_code)
-            >>> if 'refresh_token' in result:
-            ...     print(f"Save this as M365_REFRESH_TOKEN: {result['refresh_token']}")
         """
         scopes = scopes or self.config.graph_scopes
         
@@ -336,13 +396,20 @@ class TokenManager:
         if "access_token" in result:
             logger.info("Device code authentication successful")
             
-            # Log refresh token info for Railway deployment
+            # AUTO-SAVE refresh token to Railway for persistence
             if "refresh_token" in result:
                 rt = result["refresh_token"]
-                logger.info(
-                    f"Refresh token obtained. For Railway deployment, set "
-                    f"M365_REFRESH_TOKEN env var. Token preview: {rt[:10]}...{rt[-10:]}"
-                )
+                logger.info("Saving refresh token to Railway env var for automatic persistence...")
+                saved = self._save_refresh_token_to_railway(rt)
+                
+                if saved:
+                    logger.info("Refresh token saved! Authentication will persist across deploys.")
+                else:
+                    # Fallback: log token for manual copy
+                    logger.info(
+                        f"Could not auto-save to Railway. Manually set M365_REFRESH_TOKEN env var. "
+                        f"Token preview: {rt[:10]}...{rt[-10:]}"
+                    )
         else:
             logger.error(
                 f"Device code auth failed: "
