@@ -119,7 +119,7 @@ class UsersService:
             List of matching user objects
         """
         # Use $filter with startswith for searching
-        # Graph API doesn't have a simple search for users, so we use filter
+        # Note: Graph API doesn't support $orderby with complex 'or' filters
         filter_query = (
             f"startswith(displayName, '{query}') or "
             f"startswith(mail, '{query}') or "
@@ -132,7 +132,7 @@ class UsersService:
             "$top": count,
             "$filter": filter_query,
             "$select": ",".join(self.DEFAULT_SELECT),
-            "$orderby": "displayName",
+            # Note: $orderby removed - not supported with 'or' filter queries
         }
         
         # Need ConsistencyLevel header for advanced queries
