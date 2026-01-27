@@ -8,6 +8,12 @@ Supports both:
 Requires bearer token authentication via MCP_BEARER_TOKEN env var.
 Exposes /health endpoint for healthchecks.
 Exposes /auth/device-code for initial authentication.
+
+Authentication Flow:
+    When an MCP client connects and calls any tool without valid auth,
+    the server automatically initiates device code flow and returns
+    the code/URL to the client. User completes auth in browser, then
+    retries the tool call.
 """
 
 import asyncio
@@ -64,12 +70,13 @@ office_docs: Optional[OfficeDocsService] = None
 teams: Optional[TeamsService] = None
 powerbi: Optional[PowerBIService] = None
 
-# Device code flow state
+# Device code flow state (for async tracking)
 _device_flow_state = {
     "active": False,
     "info": None,
     "result": None,
     "error": None,
+    "pending_since": None,
 }
 _device_flow_lock = threading.Lock()
 
@@ -111,6 +118,11 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="m365_auth_status",
             description="Check M365 authentication status",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="m365_authenticate",
+            description="Start M365 authentication using device code flow. Returns a URL and code to enter in your browser.",
             inputSchema={"type": "object", "properties": {}},
         ),
         
@@ -317,20 +329,101 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await _execute_tool(name, arguments)
         return [TextContent(type="text", text=str(result))]
     except AuthenticationRequiredError as e:
-        return [TextContent(type="text", text=f"Authentication required: {e}")]
+        # Trigger device code flow and return instructions
+        auth_result = await _get_or_start_device_code_flow()
+        return [TextContent(type="text", text=str(auth_result))]
     except Exception as e:
         logger.exception(f"Tool {name} failed")
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
+async def _get_or_start_device_code_flow() -> dict[str, Any]:
+    """Get existing device code flow info or start a new one.
+    
+    Returns device code info for user to complete authentication.
+    """
+    global _device_flow_state
+    
+    with _device_flow_lock:
+        # If flow already active and not expired (15 min timeout)
+        if _device_flow_state["active"] and _device_flow_state["info"]:
+            pending_since = _device_flow_state["pending_since"]
+            if pending_since and (datetime.utcnow() - pending_since).seconds < 900:
+                info = _device_flow_state["info"]
+                return {
+                    "status": "authentication_required",
+                    "message": "Please complete authentication to use M365 features.",
+                    "action_required": True,
+                    "instructions": [
+                        f"1. Open your browser and go to: {info.get('verification_uri', 'https://microsoft.com/devicelogin')}",
+                        f"2. Enter the code: {info.get('user_code', 'N/A')}",
+                        "3. Sign in with your Microsoft 365 account",
+                        "4. After signing in, retry your request"
+                    ],
+                    "device_code": info.get("user_code"),
+                    "verification_url": info.get("verification_uri"),
+                }
+        
+        # Check if we just completed auth
+        if _device_flow_state["result"] and "access_token" in _device_flow_state["result"]:
+            _device_flow_state["active"] = False
+            return {
+                "status": "authenticated",
+                "message": "Authentication successful! Please retry your request."
+            }
+    
+    # Start new device code flow
+    _start_device_code_flow_background()
+    
+    # Wait briefly for flow to initialize
+    await asyncio.sleep(2)
+    
+    with _device_flow_lock:
+        info = _device_flow_state["info"]
+    
+    if info:
+        return {
+            "status": "authentication_required",
+            "message": "Microsoft 365 authentication is required. Please complete the following steps:",
+            "action_required": True,
+            "instructions": [
+                f"1. Open your browser and go to: {info.get('verification_uri', 'https://microsoft.com/devicelogin')}",
+                f"2. Enter the code: {info.get('user_code', 'N/A')}",
+                "3. Sign in with your Microsoft 365 account",
+                "4. After signing in, retry your request"
+            ],
+            "device_code": info.get("user_code"),
+            "verification_url": info.get("verification_uri"),
+        }
+    
+    return {
+        "status": "authentication_starting",
+        "message": "Authentication is being initialized. Please wait a moment and retry.",
+    }
+
+
 async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
     """Route tool calls to appropriate service methods."""
     
-    # Auth status
+    # Auth tools don't require existing auth
     if name == "m365_auth_status":
-        if token_manager and token_manager.get_graph_token():
-            return {"authenticated": True, "message": "Valid token available"}
-        return {"authenticated": False, "message": "No valid token"}
+        if token_manager and token_manager.is_authenticated():
+            account = token_manager.get_current_account()
+            return {
+                "authenticated": True,
+                "message": "Valid token available",
+                "account": account.get("username") if account else None
+            }
+        return {"authenticated": False, "message": "No valid token - authentication required"}
+    
+    if name == "m365_authenticate":
+        # Explicitly trigger device code flow
+        return await _get_or_start_device_code_flow()
+    
+    # All other tools require authentication
+    if not token_manager or not token_manager.is_authenticated():
+        # Return auth prompt instead of raising
+        return await _get_or_start_device_code_flow()
     
     # Outlook - Mail
     if name == "outlook_list_messages":
@@ -442,13 +535,14 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
 # Device Code Authentication Flow
 # =============================================================================
 
-def _run_device_code_flow_background():
+def _start_device_code_flow_background():
     """Run device code flow in background thread."""
     global _device_flow_state
     
     def callback(info):
         with _device_flow_lock:
             _device_flow_state["info"] = info
+            _device_flow_state["pending_since"] = datetime.utcnow()
         # Log to Railway logs
         logger.info("=" * 60)
         logger.info("DEVICE CODE AUTHENTICATION REQUIRED")
@@ -462,6 +556,7 @@ def _run_device_code_flow_background():
             with _device_flow_lock:
                 _device_flow_state["active"] = True
                 _device_flow_state["error"] = None
+                _device_flow_state["result"] = None
             
             result = token_manager.authenticate_device_code(callback=callback)
             
@@ -487,6 +582,11 @@ def _run_device_code_flow_background():
             with _device_flow_lock:
                 _device_flow_state["error"] = str(e)
                 _device_flow_state["active"] = False
+    
+    # Only start if not already running
+    with _device_flow_lock:
+        if _device_flow_state["active"]:
+            return
     
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -523,7 +623,7 @@ async def handle_device_code_start(request: Request) -> Response:
                 })
     
     # Start new flow
-    _run_device_code_flow_background()
+    _start_device_code_flow_background()
     
     # Wait briefly for flow to initialize
     await asyncio.sleep(2)
@@ -600,6 +700,7 @@ async def handle_auth_logout(request: Request) -> Response:
             "info": None,
             "result": None,
             "error": None,
+            "pending_since": None,
         }
     
     return JSONResponse({
