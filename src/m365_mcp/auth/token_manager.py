@@ -16,6 +16,13 @@ Railway Deployment:
     Set M365_REFRESH_TOKEN env var to persist auth across deploys.
     The refresh token is used to bootstrap the MSAL cache on startup.
 
+Note on MSAL Application Types:
+    - ConfidentialClientApplication: Has client_secret, used for token refresh
+    - PublicClientApplication: No client_secret, required for device code flow
+    
+    Device code flow ONLY works with PublicClientApplication, so we maintain
+    both types when client_secret is provided.
+
 """
 
 import logging
@@ -42,7 +49,8 @@ class TokenManager:
     Attributes:
         config: M365 configuration instance
         cache: Encrypted token cache
-        app: MSAL application instance
+        app: MSAL application instance (ConfidentialClient if secret provided)
+        public_app: MSAL PublicClientApplication for device code flow
     
     Example:
         >>> config = M365Config()
@@ -74,7 +82,16 @@ class TokenManager:
             encryption_key=config.cache_encryption_key
         )
         
-        # Create MSAL application
+        # Always create a PublicClientApplication for device code flow
+        # Device code flow ONLY works with PublicClientApplication
+        self.public_app = msal.PublicClientApplication(
+            client_id=config.client_id,
+            authority=config.authority,
+            token_cache=self.cache,
+        )
+        logger.info("Initialized public client application (for device code flow)")
+        
+        # Create MSAL application for token operations
         # Use ConfidentialClientApplication if client_secret is provided
         if config.is_confidential_client:
             self.app: msal.ClientApplication = msal.ConfidentialClientApplication(
@@ -83,14 +100,11 @@ class TokenManager:
                 client_credential=config.client_secret,
                 token_cache=self.cache,
             )
-            logger.info("Initialized confidential client application")
+            logger.info("Initialized confidential client application (for token refresh)")
         else:
-            self.app = msal.PublicClientApplication(
-                client_id=config.client_id,
-                authority=config.authority,
-                token_cache=self.cache,
-            )
-            logger.info("Initialized public client application")
+            # No client secret - use public app for everything
+            self.app = self.public_app
+            logger.info("Using public client application (no client secret)")
         
         logger.info(f"TokenManager initialized for tenant: {config.tenant_id}")
         
@@ -226,6 +240,9 @@ class TokenManager:
         you can't open a browser directly. User visits a URL and enters
         a code to complete authentication.
         
+        NOTE: Device code flow requires PublicClientApplication, not
+        ConfidentialClientApplication. This method uses self.public_app.
+        
         Args:
             scopes: OAuth scopes to request (defaults to graph_scopes)
             callback: Optional function to receive device code info.
@@ -250,8 +267,9 @@ class TokenManager:
         """
         scopes = scopes or self.config.graph_scopes
         
-        # Initiate device code flow
-        flow = self.app.initiate_device_flow(scopes=scopes)
+        # IMPORTANT: Device code flow ONLY works with PublicClientApplication
+        # ConfidentialClientApplication does NOT have initiate_device_flow method
+        flow = self.public_app.initiate_device_flow(scopes=scopes)
         
         if "user_code" not in flow:
             error_msg = flow.get("error_description", "Unknown error")
@@ -274,7 +292,7 @@ class TokenManager:
             print(f"\n{flow['message']}\n")
         
         # Block until user completes authentication (or timeout)
-        result = self.app.acquire_token_by_device_flow(flow)
+        result = self.public_app.acquire_token_by_device_flow(flow)
         
         if "access_token" in result:
             logger.info("Device code authentication successful")
