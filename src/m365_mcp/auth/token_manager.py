@@ -4,6 +4,7 @@ This module provides the TokenManager class that handles:
 - Device code flow authentication
 - Silent token acquisition with automatic refresh
 - Separate token management for Graph API and Power BI API
+- Environment variable-based refresh token for Railway deployment
 
 Token Lifecycle:
     1. User authenticates via device code flow
@@ -11,9 +12,14 @@ Token Lifecycle:
     3. On subsequent calls, MSAL automatically refreshes if needed
     4. Refresh tokens extended on each use
 
+Railway Deployment:
+    Set M365_REFRESH_TOKEN env var to persist auth across deploys.
+    The refresh token is used to bootstrap the MSAL cache on startup.
+
 """
 
 import logging
+import os
 from typing import Any, Callable, Optional
 
 import msal
@@ -29,6 +35,9 @@ class TokenManager:
     
     Handles OAuth 2.0 authentication flows and automatic token refresh.
     Supports both Microsoft Graph API and Power BI API tokens.
+    
+    Supports M365_REFRESH_TOKEN env var for Railway deployment where
+    the token cache is ephemeral.
     
     Attributes:
         config: M365 configuration instance
@@ -84,6 +93,67 @@ class TokenManager:
             logger.info("Initialized public client application")
         
         logger.info(f"TokenManager initialized for tenant: {config.tenant_id}")
+        
+        # Bootstrap from M365_REFRESH_TOKEN env var if available
+        # This enables token persistence across Railway deploys
+        self._bootstrap_from_env_refresh_token()
+    
+    def _bootstrap_from_env_refresh_token(self) -> None:
+        """Bootstrap MSAL cache from M365_REFRESH_TOKEN env var.
+        
+        This is critical for Railway deployment where the container
+        filesystem is ephemeral. The refresh token from the env var
+        is used to acquire a fresh access token and populate the cache.
+        """
+        refresh_token = os.environ.get("M365_REFRESH_TOKEN")
+        
+        if not refresh_token:
+            logger.debug("M365_REFRESH_TOKEN not set, skipping bootstrap")
+            return
+        
+        # Check if we already have valid cached accounts
+        accounts = self.app.get_accounts()
+        if accounts:
+            logger.info("Existing cached accounts found, skipping refresh token bootstrap")
+            return
+        
+        logger.info("Bootstrapping from M365_REFRESH_TOKEN environment variable...")
+        
+        # Use the refresh token to acquire new tokens
+        # This populates the MSAL cache with the account and tokens
+        try:
+            result = self.app.acquire_token_by_refresh_token(
+                refresh_token=refresh_token,
+                scopes=self.config.graph_scopes,
+            )
+            
+            if "access_token" in result:
+                logger.info("Successfully bootstrapped auth from M365_REFRESH_TOKEN")
+                
+                # Log the new refresh token if it changed (for manual update)
+                new_refresh_token = result.get("refresh_token")
+                if new_refresh_token and new_refresh_token != refresh_token:
+                    logger.info(
+                        "Refresh token was rotated. Consider updating M365_REFRESH_TOKEN "
+                        "env var with the new value for extended validity."
+                    )
+                    # Log first/last few chars for identification (not the full token)
+                    logger.debug(
+                        f"New refresh token: {new_refresh_token[:10]}...{new_refresh_token[-10:]}"
+                    )
+            else:
+                error = result.get("error", "unknown_error")
+                error_desc = result.get("error_description", "No description")
+                logger.error(f"Failed to bootstrap from refresh token: {error} - {error_desc}")
+                
+                if "invalid_grant" in error or "expired" in error_desc.lower():
+                    logger.error(
+                        "The M365_REFRESH_TOKEN has expired or been revoked. "
+                        "You need to re-authenticate and obtain a new refresh token."
+                    )
+                    
+        except Exception as e:
+            logger.exception(f"Error bootstrapping from refresh token: {e}")
     
     def get_graph_token(self) -> Optional[str]:
         """Get valid access token for Microsoft Graph API.
@@ -165,12 +235,18 @@ class TokenManager:
         Returns:
             MSAL token result dict. Contains 'access_token' on success,
             or 'error' and 'error_description' on failure.
+            
+            IMPORTANT: If you need to persist auth across Railway deploys,
+            save the 'refresh_token' from this result as M365_REFRESH_TOKEN
+            environment variable.
         
         Example:
             >>> def show_code(info):
             ...     print(f"Go to {info['verification_uri']}")
             ...     print(f"Enter code: {info['user_code']}")
             >>> result = manager.authenticate_device_code(callback=show_code)
+            >>> if 'refresh_token' in result:
+            ...     print(f"Save this as M365_REFRESH_TOKEN: {result['refresh_token']}")
         """
         scopes = scopes or self.config.graph_scopes
         
@@ -202,6 +278,14 @@ class TokenManager:
         
         if "access_token" in result:
             logger.info("Device code authentication successful")
+            
+            # Log refresh token info for Railway deployment
+            if "refresh_token" in result:
+                rt = result["refresh_token"]
+                logger.info(
+                    f"Refresh token obtained. For Railway deployment, set "
+                    f"M365_REFRESH_TOKEN env var. Token preview: {rt[:10]}...{rt[-10:]}"
+                )
         else:
             logger.error(
                 f"Device code auth failed: "
@@ -231,6 +315,35 @@ class TokenManager:
         """
         accounts = self.app.get_accounts()
         return accounts[0] if accounts else None
+    
+    def get_current_refresh_token(self) -> Optional[str]:
+        """Get the current refresh token from cache for manual backup.
+        
+        This is useful for obtaining the refresh token to store as
+        M365_REFRESH_TOKEN env var for Railway deployment.
+        
+        Returns:
+            Refresh token string, or None if not available
+            
+        Note:
+            This accesses internal MSAL cache structure and may break
+            with future MSAL updates. Use with caution.
+        """
+        try:
+            # Access the internal cache state
+            cache_state = self.cache.serialize()
+            if cache_state:
+                import json
+                cache_data = json.loads(cache_state)
+                refresh_tokens = cache_data.get("RefreshToken", {})
+                if refresh_tokens:
+                    # Get the first refresh token
+                    first_rt = next(iter(refresh_tokens.values()), {})
+                    return first_rt.get("secret")
+        except Exception as e:
+            logger.warning(f"Could not extract refresh token from cache: {e}")
+        
+        return None
     
     def logout(self) -> None:
         """Clear all cached tokens and accounts."""
