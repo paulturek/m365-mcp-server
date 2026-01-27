@@ -1,25 +1,30 @@
 """M365 MCP Server entry point.
 
-Runs the MCP server with HTTP/SSE transport for Railway deployment.
-Supports bearer token authentication via MCP_BEARER_TOKEN env var.
+Runs the MCP server with HTTP transport for Railway deployment.
+Supports both:
+- Streamable HTTP transport (POST /mcp) - Modern standard
+- Legacy SSE transport (GET /sse, POST /messages) - Backward compatibility
+
+Requires bearer token authentication via MCP_BEARER_TOKEN env var.
 Exposes /health endpoint for healthchecks.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
 
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
 from starlette.requests import Request
 import uvicorn
 
@@ -423,7 +428,7 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
 
 
 # =============================================================================
-# HTTP Server for Railway (with health endpoint and MCP SSE transport)
+# HTTP Server with Streamable HTTP Transport (Modern) + Legacy SSE
 # =============================================================================
 
 def check_bearer_token(request: Request) -> bool:
@@ -458,54 +463,292 @@ async def status_check(request: Request) -> Response:
         "auth_status": auth_status,
         "services": ["outlook", "onedrive", "sharepoint", "excel", "teams", "powerbi"],
         "mcp_endpoints": {
-            "sse": "/sse",
-            "messages": "/messages",
+            "streamable_http": "/mcp",
+            "legacy_sse": "/sse",
+            "legacy_messages": "/messages",
         },
     })
 
 
-# SSE transport for MCP
-sse_transport = SseServerTransport("/messages")
+# =============================================================================
+# Streamable HTTP Transport (Modern MCP Standard)
+# =============================================================================
+
+# Session storage for Streamable HTTP
+sessions: dict[str, dict] = {}
 
 
-async def handle_sse(request: Request) -> Response:
-    """Handle SSE connection for MCP with bearer token auth."""
+async def handle_mcp_request(request: Request) -> Response:
+    """
+    Handle MCP Streamable HTTP transport.
+    
+    This is the modern MCP transport that uses a single /mcp endpoint.
+    - POST: Handle JSON-RPC requests
+    - GET: Optional SSE stream for server-initiated messages
+    """
+    # Check auth for all MCP requests
     if not check_bearer_token(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    logger.info("New MCP SSE connection established")
+    if request.method == "GET":
+        # SSE stream for server-initiated notifications (optional)
+        return await handle_mcp_sse_stream(request)
     
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await server.run(
-            streams[0],
-            streams[1],
-            server.create_initialization_options(),
-        )
+    elif request.method == "POST":
+        # JSON-RPC request handling
+        return await handle_mcp_post(request)
     
-    return Response()
+    return JSONResponse({"error": "Method not allowed"}, status_code=405)
 
 
-async def handle_messages(request: Request) -> Response:
-    """Handle MCP messages with bearer token auth."""
+async def handle_mcp_post(request: Request) -> Response:
+    """Handle POST requests to /mcp endpoint (JSON-RPC)."""
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "error": {"code": -32700, "message": f"Parse error: {e}"},
+            "id": None
+        }, status_code=400)
+    
+    # Get or create session
+    session_id = request.headers.get("Mcp-Session-Id", str(uuid.uuid4()))
+    
+    # Handle the JSON-RPC request
+    method = body.get("method", "")
+    params = body.get("params", {})
+    request_id = body.get("id")
+    
+    logger.info(f"MCP request: {method} (session: {session_id})")
+    
+    try:
+        result = await process_jsonrpc_method(method, params, session_id)
+        
+        response_data = {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": request_id
+        }
+        
+        response = JSONResponse(response_data)
+        response.headers["Mcp-Session-Id"] = session_id
+        return response
+        
+    except Exception as e:
+        logger.exception(f"MCP method {method} failed")
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "error": {"code": -32603, "message": str(e)},
+            "id": request_id
+        }, status_code=500)
+
+
+async def process_jsonrpc_method(method: str, params: dict, session_id: str) -> Any:
+    """Process a JSON-RPC method call."""
+    
+    if method == "initialize":
+        # MCP initialization
+        sessions[session_id] = {"initialized": True}
+        return {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False},
+            },
+            "serverInfo": {
+                "name": "m365-mcp-server",
+                "version": "1.0.0"
+            }
+        }
+    
+    elif method == "notifications/initialized":
+        # Client confirming initialization - no response needed
+        return {}
+    
+    elif method == "tools/list":
+        # List available tools
+        tools = await list_tools()
+        return {
+            "tools": [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.inputSchema
+                }
+                for t in tools
+            ]
+        }
+    
+    elif method == "tools/call":
+        # Execute a tool
+        tool_name = params.get("name", "")
+        tool_args = params.get("arguments", {})
+        
+        result = await call_tool(tool_name, tool_args)
+        
+        return {
+            "content": [
+                {"type": r.type, "text": r.text}
+                for r in result
+            ]
+        }
+    
+    elif method == "resources/list":
+        # No resources exposed currently
+        return {"resources": []}
+    
+    elif method == "prompts/list":
+        # No prompts exposed currently
+        return {"prompts": []}
+    
+    elif method == "ping":
+        return {}
+    
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+async def handle_mcp_sse_stream(request: Request) -> Response:
+    """Handle GET requests for SSE streaming (server-initiated messages)."""
+    
+    async def event_generator():
+        # Send initial connection event
+        yield f"event: endpoint\ndata: /mcp\n\n"
+        
+        # Keep connection alive with periodic pings
+        while True:
+            await asyncio.sleep(30)
+            yield f"event: ping\ndata: {{}}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# =============================================================================
+# Legacy SSE Transport (Backward Compatibility)
+# =============================================================================
+
+# Store for legacy SSE sessions
+legacy_sessions: dict[str, asyncio.Queue] = {}
+
+
+async def handle_legacy_sse(request: Request) -> Response:
+    """Handle legacy SSE connection (GET /sse)."""
     if not check_bearer_token(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    return await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+    session_id = str(uuid.uuid4())
+    legacy_sessions[session_id] = asyncio.Queue()
+    
+    logger.info(f"New legacy SSE connection: {session_id}")
+    
+    async def event_generator():
+        # Send the endpoint event with session info
+        endpoint_data = json.dumps({"uri": f"/messages?session_id={session_id}"})
+        yield f"event: endpoint\ndata: {endpoint_data}\n\n"
+        
+        try:
+            while True:
+                try:
+                    # Wait for messages to send
+                    message = await asyncio.wait_for(
+                        legacy_sessions[session_id].get(),
+                        timeout=30
+                    )
+                    yield f"event: message\ndata: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    yield f": keepalive\n\n"
+        finally:
+            legacy_sessions.pop(session_id, None)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
+
+async def handle_legacy_messages(request: Request) -> Response:
+    """Handle legacy message POST (POST /messages)."""
+    if not check_bearer_token(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    session_id = request.query_params.get("session_id")
+    if not session_id or session_id not in legacy_sessions:
+        return JSONResponse({"error": "Invalid session"}, status_code=400)
+    
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "error": {"code": -32700, "message": f"Parse error: {e}"},
+            "id": None
+        }, status_code=400)
+    
+    method = body.get("method", "")
+    params = body.get("params", {})
+    request_id = body.get("id")
+    
+    logger.info(f"Legacy MCP request: {method}")
+    
+    try:
+        result = await process_jsonrpc_method(method, params, session_id)
+        
+        response_data = {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": request_id
+        }
+        
+        # Queue response for SSE stream
+        await legacy_sessions[session_id].put(response_data)
+        
+        return JSONResponse({"status": "accepted"}, status_code=202)
+        
+    except Exception as e:
+        logger.exception(f"Legacy MCP method {method} failed")
+        error_response = {
+            "jsonrpc": "2.0",
+            "error": {"code": -32603, "message": str(e)},
+            "id": request_id
+        }
+        await legacy_sessions[session_id].put(error_response)
+        return JSONResponse({"status": "error"}, status_code=500)
+
+
+# =============================================================================
+# App Factory
+# =============================================================================
 
 def create_http_app() -> Starlette:
-    """Create Starlette app with health endpoints and MCP SSE transport."""
+    """Create Starlette app with health endpoints and MCP transports."""
     routes = [
         # Health/status endpoints (no auth required)
         Route("/health", health_check, methods=["GET"]),
         Route("/status", status_check, methods=["GET"]),
         Route("/", health_check, methods=["GET"]),
         
-        # MCP SSE transport endpoints (bearer auth required)
-        Route("/sse", handle_sse, methods=["GET"]),
-        Route("/messages", handle_messages, methods=["POST"]),
+        # Streamable HTTP transport (modern - recommended)
+        Route("/mcp", handle_mcp_request, methods=["GET", "POST"]),
+        
+        # Legacy SSE transport (backward compatibility)
+        Route("/sse", handle_legacy_sse, methods=["GET"]),
+        Route("/messages", handle_legacy_messages, methods=["POST"]),
     ]
     return Starlette(routes=routes)
 
@@ -539,8 +782,9 @@ def run_http() -> None:
         logger.warning("MCP_BEARER_TOKEN not set - MCP endpoints will reject all requests")
     
     logger.info(f"Starting HTTP server on {host}:{port}")
-    logger.info(f"MCP SSE endpoint: /sse")
-    logger.info(f"MCP messages endpoint: /messages")
+    logger.info(f"Streamable HTTP endpoint: /mcp (modern)")
+    logger.info(f"Legacy SSE endpoint: /sse")
+    logger.info(f"Legacy messages endpoint: /messages")
     
     app = create_http_app()
     uvicorn.run(app, host=host, port=port, log_level="info")
