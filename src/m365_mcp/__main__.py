@@ -578,18 +578,30 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
     
     # OneDrive
     if name == "onedrive_list_files":
+        # Convert path to folder_path, treating "/" or empty as None (root)
+        path = args.get("path", "/")
+        folder_path = None if path in ("/", "", None) else path.lstrip("/")
         return await onedrive.list_items(
-            path=args.get("path", "/"),
+            folder_path=folder_path,
             count=args.get("count", 50),
         )
     
     if name == "onedrive_get_file_content":
-        content = await onedrive.download_file(args["path"])
+        content = await onedrive.download_file_by_path(args["path"].lstrip("/"))
         return content.decode("utf-8")
     
     if name == "onedrive_upload_file":
+        path = args["path"].lstrip("/")
+        # Split into folder and filename
+        if "/" in path:
+            folder_path = "/".join(path.split("/")[:-1])
+            filename = path.split("/")[-1]
+        else:
+            folder_path = ""
+            filename = path
         return await onedrive.upload_file(
-            path=args["path"],
+            folder_path=folder_path,
+            filename=filename,
             content=args["content"].encode("utf-8"),
         )
     
