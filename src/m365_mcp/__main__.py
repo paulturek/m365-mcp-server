@@ -50,6 +50,8 @@ from .services import (
     OfficeDocsService,
     TeamsService,
     PowerBIService,
+    TodoService,
+    UsersService,
 )
 
 logging.basicConfig(
@@ -71,6 +73,8 @@ excel: Optional[ExcelService] = None
 office_docs: Optional[OfficeDocsService] = None
 teams: Optional[TeamsService] = None
 powerbi: Optional[PowerBIService] = None
+todo: Optional[TodoService] = None
+users: Optional[UsersService] = None
 
 # Device code flow state - single instance, protected by lock
 _device_flow_lock = threading.Lock()
@@ -86,7 +90,7 @@ _device_flow_state = {
 def initialize_services() -> None:
     """Initialize all M365 services."""
     global token_manager, graph_client, powerbi_client
-    global outlook, onedrive, sharepoint, excel, office_docs, teams, powerbi
+    global outlook, onedrive, sharepoint, excel, office_docs, teams, powerbi, todo, users
     
     logger.info("Initializing M365 services...")
     
@@ -101,6 +105,8 @@ def initialize_services() -> None:
     office_docs = OfficeDocsService(graph_client)
     teams = TeamsService(graph_client)
     powerbi = PowerBIService(powerbi_client)
+    todo = TodoService(graph_client)
+    users = UsersService(graph_client)
     
     logger.info("M365 services initialized")
 
@@ -320,6 +326,181 @@ async def list_tools() -> list[Tool]:
             name="powerbi_list_reports",
             description="List Power BI reports",
             inputSchema={"type": "object", "properties": {}},
+        ),
+        
+        # Microsoft To Do - Task Lists
+        Tool(
+            name="todo_list_task_lists",
+            description="List all Microsoft To Do task lists",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="todo_create_task_list",
+            description="Create a new Microsoft To Do task list",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "display_name": {"type": "string", "description": "Name for the new list"},
+                },
+                "required": ["display_name"],
+            },
+        ),
+        Tool(
+            name="todo_delete_task_list",
+            description="Delete a Microsoft To Do task list",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID to delete"},
+                },
+                "required": ["list_id"],
+            },
+        ),
+        
+        # Microsoft To Do - Tasks
+        Tool(
+            name="todo_list_tasks",
+            description="List tasks in a Microsoft To Do task list",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID"},
+                    "include_completed": {"type": "boolean", "default": True, "description": "Include completed tasks"},
+                    "count": {"type": "integer", "default": 100, "description": "Maximum tasks to return"},
+                },
+                "required": ["list_id"],
+            },
+        ),
+        Tool(
+            name="todo_create_task",
+            description="Create a new task in Microsoft To Do",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID"},
+                    "title": {"type": "string", "description": "Task title"},
+                    "body": {"type": "string", "description": "Task notes/body"},
+                    "due_date": {"type": "string", "description": "Due date (YYYY-MM-DD)"},
+                    "importance": {"type": "string", "enum": ["low", "normal", "high"], "default": "normal", "description": "Task importance"},
+                    "reminder_datetime": {"type": "string", "description": "Reminder datetime (ISO format)"},
+                },
+                "required": ["list_id", "title"],
+            },
+        ),
+        Tool(
+            name="todo_update_task",
+            description="Update an existing task in Microsoft To Do",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID"},
+                    "task_id": {"type": "string", "description": "Task ID"},
+                    "title": {"type": "string", "description": "New title"},
+                    "body": {"type": "string", "description": "New notes/body"},
+                    "due_date": {"type": "string", "description": "New due date (YYYY-MM-DD)"},
+                    "importance": {"type": "string", "enum": ["low", "normal", "high"], "description": "New importance"},
+                    "status": {"type": "string", "enum": ["notStarted", "inProgress", "completed", "waitingOnOthers", "deferred"], "description": "New status"},
+                },
+                "required": ["list_id", "task_id"],
+            },
+        ),
+        Tool(
+            name="todo_complete_task",
+            description="Mark a task as completed in Microsoft To Do",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID"},
+                    "task_id": {"type": "string", "description": "Task ID to complete"},
+                },
+                "required": ["list_id", "task_id"],
+            },
+        ),
+        Tool(
+            name="todo_delete_task",
+            description="Delete a task from Microsoft To Do",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "Task list ID"},
+                    "task_id": {"type": "string", "description": "Task ID to delete"},
+                },
+                "required": ["list_id", "task_id"],
+            },
+        ),
+        
+        # Microsoft 365 Users
+        Tool(
+            name="users_get_current",
+            description="Get the current authenticated user's profile",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="users_get_user",
+            description="Get a user by ID or email address",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "User ID (GUID) or email address"},
+                    "extended": {"type": "boolean", "default": False, "description": "Include extended profile fields"},
+                },
+                "required": ["user_id"],
+            },
+        ),
+        Tool(
+            name="users_list",
+            description="List users in the organization",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer", "default": 100, "description": "Maximum users to return"},
+                    "filter": {"type": "string", "description": "OData filter (e.g., \"department eq 'Sales'\")"},
+                },
+            },
+        ),
+        Tool(
+            name="users_search",
+            description="Search for users by name or email",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "count": {"type": "integer", "default": 25, "description": "Maximum results"},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="users_get_manager",
+            description="Get a user's manager",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "User ID or email (omit for current user)"},
+                },
+            },
+        ),
+        Tool(
+            name="users_get_direct_reports",
+            description="Get a user's direct reports",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "User ID or email (omit for current user)"},
+                    "count": {"type": "integer", "default": 100, "description": "Maximum results"},
+                },
+            },
+        ),
+        Tool(
+            name="users_get_people",
+            description="Get people relevant to the current user (based on communication patterns)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional search query"},
+                    "count": {"type": "integer", "default": 25, "description": "Maximum results"},
+                },
+            },
         ),
     ]
 
@@ -642,6 +823,96 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "powerbi_list_reports":
         return await powerbi.list_reports()
     
+    # Microsoft To Do - Task Lists
+    if name == "todo_list_task_lists":
+        return await todo.list_task_lists()
+    
+    if name == "todo_create_task_list":
+        return await todo.create_task_list(args["display_name"])
+    
+    if name == "todo_delete_task_list":
+        await todo.delete_task_list(args["list_id"])
+        return {"success": True, "message": "Task list deleted"}
+    
+    # Microsoft To Do - Tasks
+    if name == "todo_list_tasks":
+        return await todo.list_tasks(
+            list_id=args["list_id"],
+            include_completed=args.get("include_completed", True),
+            count=args.get("count", 100),
+        )
+    
+    if name == "todo_create_task":
+        return await todo.create_task(
+            list_id=args["list_id"],
+            title=args["title"],
+            body=args.get("body"),
+            due_date=args.get("due_date"),
+            importance=args.get("importance", "normal"),
+            reminder_datetime=args.get("reminder_datetime"),
+        )
+    
+    if name == "todo_update_task":
+        return await todo.update_task(
+            list_id=args["list_id"],
+            task_id=args["task_id"],
+            title=args.get("title"),
+            body=args.get("body"),
+            due_date=args.get("due_date"),
+            importance=args.get("importance"),
+            status=args.get("status"),
+        )
+    
+    if name == "todo_complete_task":
+        return await todo.complete_task(
+            list_id=args["list_id"],
+            task_id=args["task_id"],
+        )
+    
+    if name == "todo_delete_task":
+        await todo.delete_task(
+            list_id=args["list_id"],
+            task_id=args["task_id"],
+        )
+        return {"success": True, "message": "Task deleted"}
+    
+    # Microsoft 365 Users
+    if name == "users_get_current":
+        return await users.get_current_user()
+    
+    if name == "users_get_user":
+        return await users.get_user(
+            user_id=args["user_id"],
+            extended=args.get("extended", False),
+        )
+    
+    if name == "users_list":
+        return await users.list_users(
+            count=args.get("count", 100),
+            filter_query=args.get("filter"),
+        )
+    
+    if name == "users_search":
+        return await users.search_users(
+            query=args["query"],
+            count=args.get("count", 25),
+        )
+    
+    if name == "users_get_manager":
+        return await users.get_manager(args.get("user_id"))
+    
+    if name == "users_get_direct_reports":
+        return await users.get_direct_reports(
+            user_id=args.get("user_id"),
+            count=args.get("count", 100),
+        )
+    
+    if name == "users_get_people":
+        return await users.get_people(
+            query=args.get("query"),
+            count=args.get("count", 25),
+        )
+    
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -847,7 +1118,7 @@ async def status_check(request: Request) -> Response:
     return JSONResponse({
         "status": "running",
         "auth_status": auth_status,
-        "services": ["outlook", "onedrive", "sharepoint", "excel", "teams", "powerbi"],
+        "services": ["outlook", "onedrive", "sharepoint", "excel", "teams", "powerbi", "todo", "users"],
         "mcp_endpoints": {
             "streamable_http": "/mcp",
             "legacy_sse": "/sse",
