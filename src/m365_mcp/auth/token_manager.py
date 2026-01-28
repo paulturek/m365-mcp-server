@@ -15,8 +15,9 @@ Token Lifecycle:
     5. Refresh tokens extended on each use
 
 Railway Deployment:
-    Set RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID env vars to enable
-    automatic persistence of refresh tokens across deploys.
+    Set RAILWAY_API_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID, and 
+    RAILWAY_ENVIRONMENT_ID env vars to enable automatic persistence of 
+    refresh tokens across deploys.
     The M365_REFRESH_TOKEN env var is updated automatically after auth.
 
 Note on MSAL Application Types:
@@ -152,6 +153,12 @@ class TokenManager:
         Uses Railway API to update M365_REFRESH_TOKEN env var so the
         token persists across deploys.
         
+        Requires the following environment variables:
+        - RAILWAY_API_TOKEN: API token with write access
+        - RAILWAY_PROJECT_ID: The Railway project ID
+        - RAILWAY_SERVICE_ID: The Railway service ID
+        - RAILWAY_ENVIRONMENT_ID: The Railway environment ID
+        
         Args:
             refresh_token: The refresh token to save
             
@@ -159,17 +166,30 @@ class TokenManager:
             True if saved successfully, False otherwise
         """
         api_token = os.environ.get("RAILWAY_API_TOKEN")
+        project_id = os.environ.get("RAILWAY_PROJECT_ID")
         service_id = os.environ.get("RAILWAY_SERVICE_ID")
+        environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID")
         
-        if not api_token or not service_id:
+        missing = []
+        if not api_token:
+            missing.append("RAILWAY_API_TOKEN")
+        if not project_id:
+            missing.append("RAILWAY_PROJECT_ID")
+        if not service_id:
+            missing.append("RAILWAY_SERVICE_ID")
+        if not environment_id:
+            missing.append("RAILWAY_ENVIRONMENT_ID")
+        
+        if missing:
             logger.warning(
-                "RAILWAY_API_TOKEN or RAILWAY_SERVICE_ID not set. "
+                f"Missing Railway config: {', '.join(missing)}. "
                 "Refresh token will not be persisted to Railway env vars. "
                 "Set these to enable automatic token persistence."
             )
             return False
         
         # GraphQL mutation to upsert environment variable
+        # Requires projectId, serviceId, environmentId, name, and value
         query = """
         mutation VariableUpsert($input: VariableUpsertInput!) {
             variableUpsert(input: $input)
@@ -178,7 +198,9 @@ class TokenManager:
         
         variables = {
             "input": {
+                "projectId": project_id,
                 "serviceId": service_id,
+                "environmentId": environment_id,
                 "name": "M365_REFRESH_TOKEN",
                 "value": refresh_token,
             }
@@ -204,6 +226,9 @@ class TokenManager:
                 logger.info("Successfully saved refresh token to Railway M365_REFRESH_TOKEN env var")
                 return True
                 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Railway API HTTP error: {e.response.status_code} - {e.response.text}")
+            return False
         except Exception as e:
             logger.exception(f"Failed to save refresh token to Railway: {e}")
             return False
@@ -410,6 +435,12 @@ class TokenManager:
                         f"Could not auto-save to Railway. Manually set M365_REFRESH_TOKEN env var. "
                         f"Token preview: {rt[:10]}...{rt[-10:]}"
                     )
+                    # Log full token for manual recovery (will be in Railway logs)
+                    logger.info("============================================================")
+                    logger.info("AUTHENTICATION SUCCESSFUL!")
+                    logger.info("If auto-save failed, manually copy this refresh token:")
+                    logger.info(f"M365_REFRESH_TOKEN={rt}")
+                    logger.info("============================================================")
         else:
             logger.error(
                 f"Device code auth failed: "
