@@ -17,7 +17,6 @@ from . import (
     teams,
     todo,
     users,
-    powerbi,
     office_docs,
 )
 
@@ -29,7 +28,6 @@ _MODULES = [
     teams,
     todo,
     users,
-    powerbi,
     office_docs,
 ]
 
