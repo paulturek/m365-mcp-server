@@ -1,66 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "m365-mcp-server"
-version = "1.0.0"
-description = "MCP Server for Microsoft 365 - Outlook, Calendar, OneDrive, SharePoint, Excel, Word, PowerPoint, Teams, Power BI"
+version = "2.0.0"
+description = "Microsoft 365 MCP server — multi-user OAuth, modular tools"
+requires-python = ">=3.11"
 readme = "README.md"
-requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [
-    {name = "Paul Turek"}
-]
-keywords = ["mcp", "microsoft365", "outlook", "teams", "sharepoint", "onedrive", "powerbi"]
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-]
+authors = [{name = "Paul Turek"}]
 
 dependencies = [
-    "mcp>=1.0.0",
-    "msal>=1.28.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
     "httpx>=0.27.0",
-    "cryptography>=42.0.0",
+    "msal>=1.28.0",
     "python-dotenv>=1.0.0",
-    # HTTP transport dependencies
-    "starlette>=0.36.0",
-    "uvicorn>=0.27.0",
-    "sse-starlette>=2.0.0",
+    # Multi-user OAuth (NEW)
+    "cryptography>=42.0.0",
+    # Option B — PostgreSQL token store (optional at runtime)
+    "asyncpg>=0.29.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "mypy>=1.8.0",
-    "ruff>=0.2.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3.0",
 ]
 
 [project.scripts]
-m365-mcp = "m365_mcp.server:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+m365-mcp = "m365_mcp.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/m365_mcp"]
 
 [tool.ruff]
+target-version = "py311"
 line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "N", "W"]
-
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
