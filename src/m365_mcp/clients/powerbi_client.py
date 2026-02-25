@@ -1,11 +1,13 @@
 """Power BI REST API HTTP client.
 
-Power BI uses a separate API endpoint and authentication scope
-from Microsoft Graph. This client handles Power BI-specific requests.
+Provides an async HTTP client for the Power BI REST API with:
+- Direct access token injection (per-user, per-request)
+- Error handling consistent with GraphClient
+- Report, dataset, and refresh operations
 
-API Base: https://api.powerbi.com/v1.0/myorg
-Scope: https://analysis.windows.net/powerbi/api/.default
-
+Usage:
+    >>> async with PowerBIClient("eyJ0...") as client:
+    ...     reports = await client.get("/reports")
 """
 
 import logging
@@ -13,92 +15,130 @@ from typing import Any, Optional
 
 import httpx
 
-from ..auth.token_manager import TokenManager
+from .graph_client import AuthenticationRequiredError, GraphAPIError
 
 logger = logging.getLogger(__name__)
 
 
-class PowerBIAuthError(Exception):
-    """Raised when Power BI authentication fails."""
-    pass
-
-
 class PowerBIClient:
     """Async HTTP client for Power BI REST API.
-    
-    Note: Power BI requires separate authentication from Microsoft Graph.
-    Users may need to authenticate specifically for Power BI if they
-    only authenticated for Graph initially.
-    
-    Attributes:
-        BASE_URL: Power BI API base URL
-        token_manager: Token manager for authentication
+
+    Accepts a raw access_token string.  The caller (tool handler) is
+    responsible for resolving the token via the token store for the
+    appropriate user_id before constructing this client.
+
+    Example:
+        >>> async with PowerBIClient(access_token) as client:
+        ...     reports = await client.get("/reports")
     """
-    
+
     BASE_URL = "https://api.powerbi.com/v1.0/myorg"
-    
-    def __init__(self, token_manager: TokenManager) -> None:
-        """Initialize Power BI client.
-        
+
+    def __init__(self, access_token: str) -> None:
+        """Initialize Power BI client with a pre-resolved access token.
+
         Args:
-            token_manager: TokenManager instance for authentication
-        """
-        self.token_manager = token_manager
-        self._client: Optional[httpx.AsyncClient] = None
-    
-    async def _ensure_client(self) -> httpx.AsyncClient:
-        """Get authenticated client for Power BI API.
-        
+            access_token: Valid Power BI / Microsoft Graph access token
+
         Raises:
-            PowerBIAuthError: If no valid Power BI token available
+            AuthenticationRequiredError: If access_token is empty/None
         """
-        token = self.token_manager.get_powerbi_token()
-        
-        if not token:
-            raise PowerBIAuthError(
-                "No Power BI token available. "
-                "You may need to authenticate with Power BI scopes."
+        if not access_token:
+            raise AuthenticationRequiredError(
+                "No access token provided. User must authenticate "
+                "via /auth/login?user_id=<email>"
             )
-        
+        self._token = access_token
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client with auth headers."""
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self.BASE_URL,
-                timeout=30.0,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=httpx.Timeout(30.0, read=60.0),
             )
-        
-        self._client.headers["Authorization"] = f"Bearer {token}"
         return self._client
-    
+
     async def get(
         self,
         endpoint: str,
-        params: Optional[dict[str, Any]] = None
+        params: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Make GET request to Power BI API."""
+        """Make GET request to Power BI API.
+
+        Args:
+            endpoint: API endpoint (e.g., '/reports')
+            params: Query parameters
+
+        Returns:
+            JSON response as dict
+        """
         client = await self._ensure_client()
         response = await client.get(endpoint, params=params)
-        response.raise_for_status()
-        return response.json() if response.content else {}
-    
+        return self._handle_response(response)
+
     async def post(
         self,
         endpoint: str,
-        json: Optional[dict[str, Any]] = None
+        json: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Make POST request to Power BI API."""
+        """Make POST request to Power BI API.
+
+        Args:
+            endpoint: API endpoint
+            json: JSON body
+
+        Returns:
+            JSON response as dict
+        """
         client = await self._ensure_client()
         response = await client.post(endpoint, json=json)
-        response.raise_for_status()
-        return response.json() if response.content else {}
-    
+        return self._handle_response(response)
+
+    def _handle_response(
+        self,
+        response: httpx.Response,
+    ) -> dict[str, Any]:
+        """Handle API response and raise appropriate errors.
+
+        Args:
+            response: httpx Response object
+
+        Returns:
+            JSON response as dict
+
+        Raises:
+            GraphAPIError: For 4xx/5xx responses
+        """
+        if response.status_code in (200, 201, 202):
+            if response.content:
+                return response.json()
+            return {}
+        if response.status_code == 204:
+            return {}
+
+        try:
+            error_data = response.json()
+            error = error_data.get("error", {})
+        except Exception:
+            error = {"code": "unknown", "message": response.text}
+        raise GraphAPIError(response.status_code, error)
+
     async def close(self) -> None:
         """Close the HTTP client."""
         if self._client:
             await self._client.aclose()
             self._client = None
-    
+
     async def __aenter__(self) -> "PowerBIClient":
+        """Async context manager entry."""
         return self
-    
+
     async def __aexit__(self, *args: Any) -> None:
+        """Async context manager exit."""
         await self.close()
