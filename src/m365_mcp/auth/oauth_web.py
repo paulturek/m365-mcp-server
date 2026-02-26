@@ -38,6 +38,11 @@ CLIENT_SECRET: str = os.environ.get("AZURE_CLIENT_SECRET", "")
 TENANT_ID: str = os.environ.get("AZURE_TENANT_ID", "common")
 REDIRECT_URI: str = os.environ.get("OAUTH_REDIRECT_URI", "")
 
+# Domain normalization: ensures all user_ids are stored/looked up
+# with the canonical email domain (e.g. "bolthousefresh.com").
+# Any email with a different domain is rewritten before token ops.
+USER_EMAIL_DOMAIN: str = os.environ.get("USER_EMAIL_DOMAIN", "")
+
 SCOPES = [
     "User.Read",
     "Files.ReadWrite.All",
@@ -84,6 +89,34 @@ def _get_msal_app() -> msal.ConfidentialClientApplication:
         client_credential=CLIENT_SECRET,
         authority=f"https://login.microsoftonline.com/{TENANT_ID}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Domain normalization
+# ---------------------------------------------------------------------------
+def _normalize_user_id(user_id: str) -> str:
+    """Rewrite user_id to use the canonical email domain.
+
+    If USER_EMAIL_DOMAIN is set (e.g. "bolthousefresh.com") and the
+    user_id contains an '@', replace whatever domain is after '@'
+    with the canonical one.
+
+    Examples (USER_EMAIL_DOMAIN=bolthousefresh.com):
+      paul.turek@bolthouse.com     → paul.turek@bolthousefresh.com
+      paul.turek@bolthousefresh.com → paul.turek@bolthousefresh.com  (no-op)
+      paul.turek@anything.com      → paul.turek@bolthousefresh.com
+    """
+    if not USER_EMAIL_DOMAIN or "@" not in user_id:
+        return user_id
+
+    local_part, current_domain = user_id.rsplit("@", 1)
+    canonical = f"{local_part}@{USER_EMAIL_DOMAIN}"
+
+    if current_domain.lower() != USER_EMAIL_DOMAIN.lower():
+        logger.info(
+            "Domain normalized: %s → %s", user_id, canonical
+        )
+    return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -148,15 +181,19 @@ async def _auto_device_code(user_id: str) -> str:
 async def get_access_token(user_id: str) -> str:
     """Return a valid MS Graph access token for *user_id*.
 
-    Automatically refreshes expired tokens.  If no token exists or
-    refresh fails, auto-starts a device-code flow and raises
-    HTTPException(401) with the sign-in code in the detail message.
+    Normalises the user_id domain, automatically refreshes expired
+    tokens. If no token exists or refresh fails, auto-starts a
+    device-code flow and raises HTTPException(401) with the sign-in
+    code in the detail message.
     """
     if not user_id:
         raise HTTPException(
             status_code=400,
             detail="user_id is required for Microsoft 365 operations",
         )
+
+    # Normalize domain before any token lookup/storage
+    user_id = _normalize_user_id(user_id)
 
     store = _get_store()
     cache = await store.get(user_id)
@@ -204,9 +241,12 @@ async def get_access_token(user_id: str) -> str:
 async def store_token(user_id: str, token_result: dict) -> None:
     """Persist a token from any auth flow (device-code, web, etc.).
 
-    Normalises the MSAL result dict into the format expected by
-    get_access_token and saves it to the token store.
+    Normalises the user_id domain and the MSAL result dict into the
+    format expected by get_access_token, then saves to the token store.
     """
+    # Normalize domain before storage
+    user_id = _normalize_user_id(user_id)
+
     id_claims = token_result.get("id_token_claims", {})
     display_name = (
         id_claims.get("name")
@@ -243,6 +283,9 @@ async def login(
             status_code=500,
             detail="OAuth not configured. Set AZURE_CLIENT_ID and OAUTH_REDIRECT_URI.",
         )
+
+    # Normalize domain for the login flow too
+    user_id = _normalize_user_id(user_id)
 
     app = _get_msal_app()
     state = secrets.token_urlsafe(32)
@@ -294,7 +337,7 @@ async def callback(request: Request):
             f"<h2>Token Exchange Failed</h2><p>{desc}</p>", status_code=400
         )
 
-    # Use the shared store_token function
+    # Use the shared store_token function (handles normalization)
     await store_token(user_id, result)
 
     id_claims = result.get("id_token_claims", {})
@@ -322,6 +365,8 @@ async def auth_status(user_id: Optional[str] = Query(None)):
     store = _get_store()
 
     if user_id:
+        # Normalize before lookup
+        user_id = _normalize_user_id(user_id)
         cache = await store.get(user_id)
         if not cache:
             return {"user_id": user_id, "authenticated": False}
@@ -342,6 +387,8 @@ async def auth_status(user_id: Optional[str] = Query(None)):
 @router.delete("/revoke")
 async def revoke(user_id: str = Query(..., description="User to revoke")):
     """Remove all stored tokens for a user."""
+    # Normalize before revoke
+    user_id = _normalize_user_id(user_id)
     store = _get_store()
     if await store.delete(user_id):
         return {"revoked": True, "user_id": user_id}
