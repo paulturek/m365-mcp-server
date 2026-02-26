@@ -1,6 +1,7 @@
 """OneDrive MCP tools.
 
-Covers: list files/folders, download, upload, delete, create folder, share.
+Covers: list files/folders, download, upload, delete, create folder, share,
+        move, rename, copy, search.
 """
 import logging
 
@@ -38,7 +39,7 @@ TOOLS = [
     },
     {
         "name": "onedrive_download_file",
-        "description": "Download a file from OneDrive. Returns file content or a download URL.",
+        "description": "Download a file from OneDrive. Returns file metadata and a download URL.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -76,7 +77,7 @@ TOOLS = [
     },
     {
         "name": "onedrive_delete_item",
-        "description": "Delete a file or folder from OneDrive.",
+        "description": "Delete a file or folder from OneDrive (moves to recycle bin).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -130,13 +131,13 @@ TOOLS = [
                 },
                 "type": {
                     "type": "string",
-                    "enum": ["view", "edit"],
+                    "enum": ["view", "edit", "embed"],
                     "default": "view",
                     "description": "Permission level",
                 },
                 "scope": {
                     "type": "string",
-                    "enum": ["anonymous", "organization"],
+                    "enum": ["anonymous", "organization", "users"],
                     "default": "organization",
                     "description": "Sharing scope",
                 },
@@ -144,7 +145,116 @@ TOOLS = [
             "required": ["user_id"],
         },
     },
+    {
+        "name": "onedrive_move_item",
+        "description": "Move a file or folder to a different location in OneDrive.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_id": {
+                    "type": "string",
+                    "description": "OneDrive item ID to move",
+                },
+                "item_path": {
+                    "type": "string",
+                    "description": "Path to the item to move (alternative to item_id)",
+                },
+                "destination_path": {
+                    "type": "string",
+                    "description": "Destination parent folder path (e.g. '/Documents/Archive')",
+                },
+                "destination_id": {
+                    "type": "string",
+                    "description": "Destination parent folder ID (alternative)",
+                },
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "onedrive_rename_item",
+        "description": "Rename a file or folder in OneDrive.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_id": {
+                    "type": "string",
+                    "description": "OneDrive item ID to rename",
+                },
+                "item_path": {
+                    "type": "string",
+                    "description": "Path to the item to rename (alternative to item_id)",
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "New name for the item",
+                },
+            },
+            "required": ["user_id", "new_name"],
+        },
+    },
+    {
+        "name": "onedrive_copy_item",
+        "description": "Copy a file or folder to a new location in OneDrive (async operation).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_id": {
+                    "type": "string",
+                    "description": "OneDrive item ID to copy",
+                },
+                "item_path": {
+                    "type": "string",
+                    "description": "Path to the item to copy (alternative to item_id)",
+                },
+                "destination_path": {
+                    "type": "string",
+                    "description": "Destination parent folder path",
+                },
+                "destination_id": {
+                    "type": "string",
+                    "description": "Destination parent folder ID (alternative)",
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "Optional new name for the copy",
+                },
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "onedrive_search",
+        "description": "Search for files and folders in OneDrive by name or content.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "query": {
+                    "type": "string",
+                    "description": "Search query (file name or content keyword)",
+                },
+                "top": {"type": "integer", "default": 25},
+            },
+            "required": ["user_id", "query"],
+        },
+    },
 ]
+
+# ---- Helper to resolve item endpoint -----------------------------------
+
+
+def _resolve_item_endpoint(params: dict) -> str | None:
+    """Return the Graph endpoint for a drive item from item_id or item_path."""
+    if params.get("item_id"):
+        return f"/me/drive/items/{params['item_id']}"
+    if params.get("item_path"):
+        return f"/me/drive/root:/{params['item_path'].strip('/')}"
+    return None
+
 
 # ---- Handlers -----------------------------------------------------------
 
@@ -179,11 +289,8 @@ async def _list_files(params: dict) -> dict:
 async def _download_file(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    if params.get("item_id"):
-        endpoint = f"/me/drive/items/{params['item_id']}"
-    elif params.get("item_path"):
-        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}"
-    else:
+    endpoint = _resolve_item_endpoint(params)
+    if not endpoint:
         return {"error": "Provide item_path or item_id"}
     meta = await client.get(endpoint)
     download_url = meta.get("@microsoft.graph.downloadUrl", "")
@@ -204,7 +311,7 @@ async def _upload_file(params: dict) -> dict:
     path = params["path"].strip("/")
     content_bytes = base64.b64decode(params["content"])
     endpoint = f"/me/drive/root:/{path}:/content"
-    result = await client.put(endpoint, content=content_bytes)
+    result = await client.put(endpoint, data=content_bytes)
     return {
         "name": result.get("name"),
         "id": result.get("id"),
@@ -216,11 +323,8 @@ async def _upload_file(params: dict) -> dict:
 async def _delete_item(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    if params.get("item_id"):
-        endpoint = f"/me/drive/items/{params['item_id']}"
-    elif params.get("item_path"):
-        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}"
-    else:
+    endpoint = _resolve_item_endpoint(params)
+    if not endpoint:
         return {"error": "Provide item_path or item_id"}
     await client.delete(endpoint)
     return {"deleted": True}
@@ -251,22 +355,135 @@ async def _create_folder(params: dict) -> dict:
 async def _share_item(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
+    # Build createLink endpoint — different format for ID vs path
     if params.get("item_id"):
-        base = f"/me/drive/items/{params['item_id']}"
+        endpoint = f"/me/drive/items/{params['item_id']}/createLink"
     elif params.get("item_path"):
-        base = f"/me/drive/root:/{params['item_path'].strip('/')}"
+        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}:/createLink"
     else:
         return {"error": "Provide item_path or item_id"}
     body = {
         "type": params.get("type", "view"),
         "scope": params.get("scope", "organization"),
     }
-    result = await client.post(f"{base}:/createLink", json=body)
+    result = await client.post(endpoint, json=body)
     link = result.get("link", {})
     return {
         "webUrl": link.get("webUrl"),
         "type": link.get("type"),
         "scope": link.get("scope"),
+    }
+
+
+async def _move_item(params: dict) -> dict:
+    """PATCH /me/drive/items/{id} — move item by changing parentReference."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    endpoint = _resolve_item_endpoint(params)
+    if not endpoint:
+        return {"error": "Provide item_path or item_id"}
+
+    patch: dict = {}
+    if params.get("destination_id"):
+        patch["parentReference"] = {"id": params["destination_id"]}
+    elif params.get("destination_path"):
+        # Resolve destination folder ID first
+        dest_path = params["destination_path"].strip("/")
+        dest_endpoint = (
+            "/me/drive/root"
+            if dest_path in ("", "/")
+            else f"/me/drive/root:/{dest_path}"
+        )
+        dest_meta = await client.get(dest_endpoint)
+        patch["parentReference"] = {"id": dest_meta.get("id")}
+    else:
+        return {"error": "Provide destination_path or destination_id"}
+
+    result = await client.patch(endpoint, json=patch)
+    return {
+        "id": result.get("id"),
+        "name": result.get("name"),
+        "webUrl": result.get("webUrl"),
+        "parentReference": result.get("parentReference", {}).get("path"),
+    }
+
+
+async def _rename_item(params: dict) -> dict:
+    """PATCH /me/drive/items/{id} — rename item."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    endpoint = _resolve_item_endpoint(params)
+    if not endpoint:
+        return {"error": "Provide item_path or item_id"}
+
+    result = await client.patch(endpoint, json={"name": params["new_name"]})
+    return {
+        "id": result.get("id"),
+        "name": result.get("name"),
+        "webUrl": result.get("webUrl"),
+    }
+
+
+async def _copy_item(params: dict) -> dict:
+    """POST /me/drive/items/{id}/copy — async copy operation."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+
+    if params.get("item_id"):
+        endpoint = f"/me/drive/items/{params['item_id']}/copy"
+    elif params.get("item_path"):
+        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}:/copy"
+    else:
+        return {"error": "Provide item_path or item_id"}
+
+    body: dict = {}
+    if params.get("destination_id"):
+        body["parentReference"] = {"id": params["destination_id"]}
+    elif params.get("destination_path"):
+        dest_path = params["destination_path"].strip("/")
+        dest_endpoint = (
+            "/me/drive/root"
+            if dest_path in ("", "/")
+            else f"/me/drive/root:/{dest_path}"
+        )
+        dest_meta = await client.get(dest_endpoint)
+        body["parentReference"] = {"id": dest_meta.get("id")}
+    else:
+        return {"error": "Provide destination_path or destination_id"}
+
+    if params.get("new_name"):
+        body["name"] = params["new_name"]
+
+    # Copy returns 202 Accepted with a Location header for monitoring
+    result = await client.post(endpoint, json=body)
+    return {
+        "accepted": True,
+        "message": "Copy operation started. It may take a moment to complete.",
+    }
+
+
+async def _search(params: dict) -> dict:
+    """GET /me/drive/root/search(q='...') — search OneDrive."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    query = params["query"]
+    top = params.get("top", 25)
+    data = await client.get(f"/me/drive/root/search(q='{query}')?$top={top}")
+    items = data.get("value", [])
+    return {
+        "count": len(items),
+        "items": [
+            {
+                "name": i.get("name"),
+                "type": "folder" if "folder" in i else "file",
+                "size": i.get("size"),
+                "id": i.get("id"),
+                "lastModified": i.get("lastModifiedDateTime"),
+                "webUrl": i.get("webUrl"),
+                "parentPath": i.get("parentReference", {}).get("path"),
+            }
+            for i in items
+        ],
     }
 
 
@@ -277,4 +494,8 @@ HANDLERS = {
     "onedrive_delete_item": _delete_item,
     "onedrive_create_folder": _create_folder,
     "onedrive_share_item": _share_item,
+    "onedrive_move_item": _move_item,
+    "onedrive_rename_item": _rename_item,
+    "onedrive_copy_item": _copy_item,
+    "onedrive_search": _search,
 }
