@@ -1,6 +1,8 @@
 """Excel MCP tools.
 
 Operations on cloud-hosted Excel workbooks via Microsoft Graph.
+Covers: workbook info, read range, write range, create chart,
+        add table rows, create worksheet, delete worksheet.
 """
 import logging
 
@@ -92,6 +94,62 @@ TOOLS = [
             "required": ["user_id", "source_range"],
         },
     },
+    {
+        "name": "excel_add_table_rows",
+        "description": "Add rows to an existing table in an Excel workbook.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_path": {"type": "string", "description": "OneDrive path to workbook"},
+                "item_id": {"type": "string", "description": "OneDrive item ID (alternative)"},
+                "table_name": {
+                    "type": "string",
+                    "description": "Table name or ID in the workbook",
+                },
+                "values": {
+                    "type": "array",
+                    "description": "2D array of row values to append",
+                    "items": {"type": "array", "items": {}},
+                },
+            },
+            "required": ["user_id", "table_name", "values"],
+        },
+    },
+    {
+        "name": "excel_create_worksheet",
+        "description": "Create a new worksheet in an Excel workbook.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_path": {"type": "string", "description": "OneDrive path to workbook"},
+                "item_id": {"type": "string", "description": "OneDrive item ID (alternative)"},
+                "name": {
+                    "type": "string",
+                    "description": "Name for the new worksheet",
+                },
+            },
+            "required": ["user_id", "name"],
+        },
+    },
+    {
+        "name": "excel_delete_worksheet",
+        "description": "Delete a worksheet from an Excel workbook.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "item_path": {"type": "string", "description": "OneDrive path to workbook"},
+                "item_id": {"type": "string", "description": "OneDrive item ID (alternative)"},
+                "worksheet": {
+                    "type": "string",
+                    "description": "Worksheet name to delete",
+                },
+            },
+            "required": ["user_id", "worksheet"],
+        },
+    },
 ]
 
 
@@ -173,9 +231,50 @@ async def _create_chart(params: dict) -> dict:
     }
 
 
+async def _add_table_rows(params: dict) -> dict:
+    """POST /workbook/tables/{name}/rows — append rows to a table."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    base = _workbook_base(params)
+    table_name = params["table_name"]
+    body = {"values": params["values"]}
+    result = await client.post(f"{base}/tables/{table_name}/rows", json=body)
+    return {
+        "index": result.get("index"),
+        "values": result.get("values"),
+    }
+
+
+async def _create_worksheet(params: dict) -> dict:
+    """POST /workbook/worksheets — create a new worksheet."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    base = _workbook_base(params)
+    body = {"name": params["name"]}
+    result = await client.post(f"{base}/worksheets", json=body)
+    return {
+        "name": result.get("name"),
+        "id": result.get("id"),
+        "position": result.get("position"),
+    }
+
+
+async def _delete_worksheet(params: dict) -> dict:
+    """DELETE /workbook/worksheets/{name} — delete a worksheet."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    base = _workbook_base(params)
+    ws = params["worksheet"]
+    await client.delete(f"{base}/worksheets/{ws}")
+    return {"deleted": True, "worksheet": ws}
+
+
 HANDLERS = {
     "excel_get_workbook_info": _get_workbook_info,
     "excel_read_range": _read_range,
     "excel_write_range": _write_range,
     "excel_create_chart": _create_chart,
+    "excel_add_table_rows": _add_table_rows,
+    "excel_create_worksheet": _create_worksheet,
+    "excel_delete_worksheet": _delete_worksheet,
 }
