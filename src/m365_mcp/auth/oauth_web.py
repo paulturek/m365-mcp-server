@@ -11,6 +11,7 @@ Routes (mounted at /auth):
 
 Public API for tool handlers:
   token = await get_access_token(user_id)
+  await store_token(user_id, token_result)
 """
 import os
 import time
@@ -86,13 +87,70 @@ def _get_msal_app() -> msal.ConfidentialClientApplication:
 
 
 # ---------------------------------------------------------------------------
-# Public: get a valid access token (auto-refresh)
+# Auto device-code flow (triggered on auth failure)
+# ---------------------------------------------------------------------------
+async def _auto_device_code(user_id: str) -> str:
+    """Start a device-code flow and return a user-friendly error message
+    containing the sign-in code. If a flow is already pending, return
+    the existing code. Falls back to /auth/login URL if device-code
+    cannot be initiated (e.g. public client flows not enabled).
+    """
+    try:
+        # Lazy import to avoid circular dependency
+        from .device_code import start_device_flow, _pending_flows
+
+        # If there's already a pending flow, return the existing code
+        if user_id in _pending_flows:
+            flow = _pending_flows[user_id]
+            code = flow.get("user_code", "")
+            uri = flow.get("verification_uri", "https://microsoft.com/devicelogin")
+            return (
+                f"Sign-in required. Go to {uri} and enter code {code} — "
+                f"then retry your request."
+            )
+
+        # Start a new device-code flow
+        result = await start_device_flow(user_id)
+
+        if result.get("status") == "error":
+            # Device code failed (public client flows not enabled, etc.)
+            logger.warning(
+                "Device-code initiation failed for %s: %s",
+                user_id,
+                result.get("error", "unknown"),
+            )
+            return (
+                f"User '{user_id}' is not authenticated. "
+                f"Visit /auth/login?user_id={user_id} to connect."
+            )
+
+        code = result.get("user_code", "")
+        uri = result.get("verification_uri", "https://microsoft.com/devicelogin")
+        expires = result.get("expires_in_seconds", 900)
+
+        return (
+            f"Sign-in required. Go to {uri} and enter code {code} "
+            f"(expires in {expires // 60} minutes). "
+            f"Once complete, retry your request."
+        )
+
+    except Exception as exc:
+        logger.warning("Auto device-code failed for %s: %s", user_id, exc)
+        return (
+            f"User '{user_id}' has not authorised. "
+            f"Visit /auth/login?user_id={user_id} to connect."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Public: get a valid access token (auto-refresh, auto-device-code)
 # ---------------------------------------------------------------------------
 async def get_access_token(user_id: str) -> str:
     """Return a valid MS Graph access token for *user_id*.
 
-    Automatically refreshes expired tokens.  Raises HTTPException(401)
-    if the user has not authorised or refresh fails.
+    Automatically refreshes expired tokens.  If no token exists or
+    refresh fails, auto-starts a device-code flow and raises
+    HTTPException(401) with the sign-in code in the detail message.
     """
     if not user_id:
         raise HTTPException(
@@ -104,13 +162,8 @@ async def get_access_token(user_id: str) -> str:
     cache = await store.get(user_id)
 
     if not cache:
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                f"User '{user_id}' has not authorised. "
-                f"Visit /auth/login?user_id={user_id} to connect."
-            ),
-        )
+        detail = await _auto_device_code(user_id)
+        raise HTTPException(status_code=401, detail=detail)
 
     # Still valid (5-min safety margin)?
     if cache.get("expires_at", 0) > time.time() + 300:
@@ -119,10 +172,8 @@ async def get_access_token(user_id: str) -> str:
     # --- Refresh ---
     refresh_token = cache.get("refresh_token")
     if not refresh_token:
-        raise HTTPException(
-            status_code=401,
-            detail=f"No refresh token for '{user_id}'. Re-authorise at /auth/login?user_id={user_id}",
-        )
+        detail = await _auto_device_code(user_id)
+        raise HTTPException(status_code=401, detail=detail)
 
     app = _get_msal_app()
     result = app.acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
@@ -130,10 +181,8 @@ async def get_access_token(user_id: str) -> str:
     if "access_token" not in result:
         logger.error("Refresh failed for %s: %s", user_id, result.get("error_description"))
         await store.delete(user_id)
-        raise HTTPException(
-            status_code=401,
-            detail=f"Token refresh failed for '{user_id}'. Re-authorise at /auth/login?user_id={user_id}",
-        )
+        detail = await _auto_device_code(user_id)
+        raise HTTPException(status_code=401, detail=detail)
 
     updated = {
         "access_token": result["access_token"],
@@ -147,6 +196,38 @@ async def get_access_token(user_id: str) -> str:
     await store.save(user_id, updated)
     logger.info("Token refreshed for %s", user_id)
     return updated["access_token"]
+
+
+# ---------------------------------------------------------------------------
+# Public: store token (used by device_code.py after successful auth)
+# ---------------------------------------------------------------------------
+async def store_token(user_id: str, token_result: dict) -> None:
+    """Persist a token from any auth flow (device-code, web, etc.).
+
+    Normalises the MSAL result dict into the format expected by
+    get_access_token and saves it to the token store.
+    """
+    id_claims = token_result.get("id_token_claims", {})
+    display_name = (
+        id_claims.get("name")
+        or id_claims.get("preferred_username")
+        or user_id
+    )
+
+    token_data = {
+        "access_token": token_result["access_token"],
+        "refresh_token": token_result.get("refresh_token", ""),
+        "expires_at": time.time() + token_result.get("expires_in", 3600),
+        "scope": token_result.get("scope", ""),
+        "display_name": display_name,
+        "microsoft_oid": id_claims.get("oid", ""),
+        "authorized_at": time.time(),
+        "last_refreshed": time.time(),
+    }
+
+    store = _get_store()
+    await store.save(user_id, token_data)
+    logger.info("Token stored for %s (%s)", display_name, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -213,27 +294,15 @@ async def callback(request: Request):
             f"<h2>Token Exchange Failed</h2><p>{desc}</p>", status_code=400
         )
 
+    # Use the shared store_token function
+    await store_token(user_id, result)
+
     id_claims = result.get("id_token_claims", {})
     display_name = (
         id_claims.get("name")
         or id_claims.get("preferred_username")
         or user_id
     )
-
-    token_data = {
-        "access_token": result["access_token"],
-        "refresh_token": result.get("refresh_token", ""),
-        "expires_at": time.time() + result.get("expires_in", 3600),
-        "scope": result.get("scope", ""),
-        "display_name": display_name,
-        "microsoft_oid": id_claims.get("oid", ""),
-        "authorized_at": time.time(),
-        "last_refreshed": time.time(),
-    }
-
-    store = _get_store()
-    await store.save(user_id, token_data)
-    logger.info("Authorised: %s (%s)", display_name, user_id)
 
     return HTMLResponse(f"""
     <!DOCTYPE html>
