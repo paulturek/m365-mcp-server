@@ -1,6 +1,7 @@
 """Users / Directory MCP tools.
 
-Covers: get current user profile, look up user, list directory, search.
+Covers: get current user profile, look up user, list directory, search,
+        get manager, get direct reports, get user photo.
 """
 import logging
 
@@ -67,6 +68,56 @@ TOOLS = [
             "required": ["user_id", "query"],
         },
     },
+    {
+        "name": "users_get_manager",
+        "description": "Get the manager of the authenticated user or a specified user.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "target": {
+                    "type": "string",
+                    "description": "User UPN or object ID (omit for current user)",
+                },
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "users_get_direct_reports",
+        "description": "Get the direct reports of the authenticated user or a specified user.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "target": {
+                    "type": "string",
+                    "description": "User UPN or object ID (omit for current user)",
+                },
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "users_get_photo",
+        "description": "Get the profile photo metadata and download URL for a user.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "target": {
+                    "type": "string",
+                    "description": "User UPN or object ID (omit for current user)",
+                },
+                "size": {
+                    "type": "string",
+                    "enum": ["48x48", "64x64", "96x96", "120x120", "240x240", "360x360", "432x432", "504x504", "648x648"],
+                    "description": "Photo size (omit for largest available)",
+                },
+            },
+            "required": ["user_id"],
+        },
+    },
 ]
 
 _USER_FIELDS = "id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,mobilePhone,businessPhones"
@@ -104,11 +155,66 @@ async def _search_users(params: dict) -> dict:
     client = GraphClient(token)
     q = params["query"]
     top = params.get("top", 10)
-    # Use startswith on displayName; Graph also supports $search with ConsistencyLevel
     filter_expr = f"startswith(displayName,'{q}') or startswith(mail,'{q}')"
     data = await client.get(f"/users?$filter={filter_expr}&$top={top}&$select={_USER_FIELDS}")
     users = data.get("value", [])
     return {"count": len(users), "users": [_format_user(u) for u in users]}
+
+
+async def _get_manager(params: dict) -> dict:
+    """GET /me/manager or /users/{id}/manager — get user's manager."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    target = params.get("target")
+    endpoint = f"/users/{target}/manager" if target else "/me/manager"
+    data = await client.get(f"{endpoint}?$select={_USER_FIELDS}")
+    return _format_user(data)
+
+
+async def _get_direct_reports(params: dict) -> dict:
+    """GET /me/directReports or /users/{id}/directReports."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    target = params.get("target")
+    endpoint = f"/users/{target}/directReports" if target else "/me/directReports"
+    data = await client.get(f"{endpoint}?$select={_USER_FIELDS}")
+    reports = data.get("value", [])
+    return {
+        "count": len(reports),
+        "directReports": [_format_user(r) for r in reports],
+    }
+
+
+async def _get_photo(params: dict) -> dict:
+    """GET user photo metadata. Returns photo info and content URL."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    target = params.get("target")
+    size = params.get("size")
+
+    if target:
+        base = f"/users/{target}"
+    else:
+        base = "/me"
+
+    if size:
+        photo_endpoint = f"{base}/photos/{size}"
+    else:
+        photo_endpoint = f"{base}/photo"
+
+    try:
+        meta = await client.get(photo_endpoint)
+        # Build the content download URL
+        content_url = f"{photo_endpoint}/$value"
+        return {
+            "width": meta.get("width"),
+            "height": meta.get("height"),
+            "id": meta.get("id"),
+            "contentType": meta.get("@odata.mediaContentType"),
+            "downloadEndpoint": content_url,
+        }
+    except Exception as e:
+        return {"error": f"Photo not available: {e}"}
 
 
 def _format_user(u: dict) -> dict:
@@ -128,4 +234,7 @@ HANDLERS = {
     "users_get_user": _get_user,
     "users_list_users": _list_users,
     "users_search": _search_users,
+    "users_get_manager": _get_manager,
+    "users_get_direct_reports": _get_direct_reports,
+    "users_get_photo": _get_photo,
 }
