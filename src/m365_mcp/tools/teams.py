@@ -1,6 +1,7 @@
 """Teams MCP tools.
 
-Covers: list joined teams, list channels, send channel message.
+Covers: list joined teams, list channels, send channel message,
+        read channel messages, list chats, read chat messages, send chat message.
 """
 import logging
 
@@ -57,7 +58,67 @@ TOOLS = [
             "required": ["user_id", "team_id", "channel_id", "message"],
         },
     },
+    {
+        "name": "teams_list_channel_messages",
+        "description": "List recent messages in a Teams channel.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "team_id": {"type": "string", "description": "Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "top": {"type": "integer", "default": 20, "description": "Max messages to return"},
+            },
+            "required": ["user_id", "team_id", "channel_id"],
+        },
+    },
+    {
+        "name": "teams_list_chats",
+        "description": "List the user's 1:1 and group chats.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "top": {"type": "integer", "default": 25, "description": "Max chats to return"},
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "teams_list_chat_messages",
+        "description": "List recent messages in a 1:1 or group chat.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "chat_id": {"type": "string", "description": "Chat ID"},
+                "top": {"type": "integer", "default": 20, "description": "Max messages to return"},
+            },
+            "required": ["user_id", "chat_id"],
+        },
+    },
+    {
+        "name": "teams_send_chat_message",
+        "description": "Send a message in a 1:1 or group chat.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "chat_id": {"type": "string", "description": "Chat ID"},
+                "message": {"type": "string", "description": "Message body (HTML supported)"},
+                "content_type": {
+                    "type": "string",
+                    "enum": ["text", "html"],
+                    "default": "html",
+                },
+            },
+            "required": ["user_id", "chat_id", "message"],
+        },
+    },
 ]
+
+
+# ---- Handlers -----------------------------------------------------------
 
 
 async def _list_teams(params: dict) -> dict:
@@ -120,8 +181,114 @@ async def _send_message(params: dict) -> dict:
     }
 
 
+async def _list_channel_messages(params: dict) -> dict:
+    """GET /teams/{id}/channels/{id}/messages — list channel messages."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    team_id = params["team_id"]
+    channel_id = params["channel_id"]
+    top = params.get("top", 20)
+    data = await client.get(
+        f"/teams/{team_id}/channels/{channel_id}/messages?$top={top}"
+    )
+    messages = data.get("value", [])
+    return {
+        "count": len(messages),
+        "messages": [
+            {
+                "id": m.get("id"),
+                "createdDateTime": m.get("createdDateTime"),
+                "from": (
+                    m.get("from", {})
+                    .get("user", {})
+                    .get("displayName")
+                ),
+                "body": m.get("body", {}).get("content", "")[:500],
+                "contentType": m.get("body", {}).get("contentType"),
+                "webUrl": m.get("webUrl"),
+            }
+            for m in messages
+        ],
+    }
+
+
+async def _list_chats(params: dict) -> dict:
+    """GET /me/chats — list user's 1:1 and group chats."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    top = params.get("top", 25)
+    data = await client.get(f"/me/chats?$top={top}&$expand=members")
+    chats = data.get("value", [])
+    return {
+        "count": len(chats),
+        "chats": [
+            {
+                "id": c.get("id"),
+                "topic": c.get("topic"),
+                "chatType": c.get("chatType"),
+                "createdDateTime": c.get("createdDateTime"),
+                "lastUpdatedDateTime": c.get("lastUpdatedDateTime"),
+                "members": [
+                    mb.get("displayName")
+                    for mb in c.get("members", [])
+                ],
+            }
+            for c in chats
+        ],
+    }
+
+
+async def _list_chat_messages(params: dict) -> dict:
+    """GET /me/chats/{id}/messages — list messages in a chat."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    chat_id = params["chat_id"]
+    top = params.get("top", 20)
+    data = await client.get(f"/me/chats/{chat_id}/messages?$top={top}")
+    messages = data.get("value", [])
+    return {
+        "count": len(messages),
+        "messages": [
+            {
+                "id": m.get("id"),
+                "createdDateTime": m.get("createdDateTime"),
+                "from": (
+                    m.get("from", {})
+                    .get("user", {})
+                    .get("displayName")
+                ),
+                "body": m.get("body", {}).get("content", "")[:500],
+                "contentType": m.get("body", {}).get("contentType"),
+            }
+            for m in messages
+        ],
+    }
+
+
+async def _send_chat_message(params: dict) -> dict:
+    """POST /me/chats/{id}/messages — send a message in a chat."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    chat_id = params["chat_id"]
+    body = {
+        "body": {
+            "contentType": params.get("content_type", "html"),
+            "content": params["message"],
+        }
+    }
+    result = await client.post(f"/me/chats/{chat_id}/messages", json=body)
+    return {
+        "id": result.get("id"),
+        "createdDateTime": result.get("createdDateTime"),
+    }
+
+
 HANDLERS = {
     "teams_list_teams": _list_teams,
     "teams_list_channels": _list_channels,
     "teams_send_message": _send_message,
+    "teams_list_channel_messages": _list_channel_messages,
+    "teams_list_chats": _list_chats,
+    "teams_list_chat_messages": _list_chat_messages,
+    "teams_send_chat_message": _send_chat_message,
 }
