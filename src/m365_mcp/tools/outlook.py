@@ -1,6 +1,7 @@
 """Outlook MCP tools.
 
-Covers: mail listing, send, update, calendar events.
+Covers: mail listing, reading, send, update, move, reply, forward, delete,
+        calendar events (list, create, update, delete), mail folders.
 """
 import logging
 
@@ -30,6 +31,21 @@ TOOLS = [
                 "search": {"type": "string", "description": "$search keyword"},
             },
             "required": ["user_id"],
+        },
+    },
+    {
+        "name": "outlook_get_message",
+        "description": "Get a single email message with full body content.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID",
+                },
+            },
+            "required": ["user_id", "message_id"],
         },
     },
     {
@@ -100,6 +116,100 @@ TOOLS = [
         },
     },
     {
+        "name": "outlook_delete_message",
+        "description": "Delete an email message (moves to Deleted Items).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID to delete",
+                },
+            },
+            "required": ["user_id", "message_id"],
+        },
+    },
+    {
+        "name": "outlook_move_message",
+        "description": "Move an email message to a different mail folder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID to move",
+                },
+                "destination_folder": {
+                    "type": "string",
+                    "description": "Destination folder ID or well-known name (e.g. 'archive', 'deleteditems', 'drafts')",
+                },
+            },
+            "required": ["user_id", "message_id", "destination_folder"],
+        },
+    },
+    {
+        "name": "outlook_reply_mail",
+        "description": "Reply to an email message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID to reply to",
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Reply body (HTML supported)",
+                },
+                "reply_all": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Reply to all recipients",
+                },
+            },
+            "required": ["user_id", "message_id", "comment"],
+        },
+    },
+    {
+        "name": "outlook_forward_mail",
+        "description": "Forward an email message to new recipients.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID to forward",
+                },
+                "to": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Recipient email addresses",
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Optional message to include with the forward",
+                },
+            },
+            "required": ["user_id", "message_id", "to"],
+        },
+    },
+    {
+        "name": "outlook_list_mail_folders",
+        "description": "List mail folders in the user's mailbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "top": {"type": "integer", "default": 25},
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
         "name": "outlook_list_calendar_events",
         "description": "List upcoming calendar events.",
         "inputSchema": {
@@ -136,7 +246,52 @@ TOOLS = [
             "required": ["user_id", "subject", "start", "end"],
         },
     },
+    {
+        "name": "outlook_update_event",
+        "description": "Update an existing calendar event (reschedule, add attendees, etc.).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "event_id": {
+                    "type": "string",
+                    "description": "The Graph event ID to update",
+                },
+                "subject": {"type": "string"},
+                "start": {"type": "string", "description": "ISO datetime for new start"},
+                "end": {"type": "string", "description": "ISO datetime for new end"},
+                "timezone": {"type": "string", "default": "America/Los_Angeles"},
+                "body": {"type": "string"},
+                "location": {"type": "string"},
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Updated attendee list (replaces existing)",
+                },
+                "is_online_meeting": {"type": "boolean"},
+            },
+            "required": ["user_id", "event_id"],
+        },
+    },
+    {
+        "name": "outlook_delete_event",
+        "description": "Delete a calendar event.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "event_id": {
+                    "type": "string",
+                    "description": "The Graph event ID to delete",
+                },
+            },
+            "required": ["user_id", "event_id"],
+        },
+    },
 ]
+
+
+# ---- Handlers -----------------------------------------------------------
 
 
 async def _list_mail(params: dict) -> dict:
@@ -165,6 +320,37 @@ async def _list_mail(params: dict) -> dict:
             }
             for m in messages
         ],
+    }
+
+
+async def _get_message(params: dict) -> dict:
+    """GET /me/messages/{id} — full message with body."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+    data = await client.get(f"/me/messages/{message_id}")
+    return {
+        "id": data.get("id"),
+        "subject": data.get("subject"),
+        "from": data.get("from", {}).get("emailAddress", {}).get("address"),
+        "toRecipients": [
+            r.get("emailAddress", {}).get("address")
+            for r in data.get("toRecipients", [])
+        ],
+        "ccRecipients": [
+            r.get("emailAddress", {}).get("address")
+            for r in data.get("ccRecipients", [])
+        ],
+        "receivedDateTime": data.get("receivedDateTime"),
+        "isRead": data.get("isRead"),
+        "importance": data.get("importance"),
+        "hasAttachments": data.get("hasAttachments"),
+        "body": {
+            "contentType": data.get("body", {}).get("contentType"),
+            "content": data.get("body", {}).get("content"),
+        },
+        "categories": data.get("categories"),
+        "flag": data.get("flag"),
     }
 
 
@@ -200,7 +386,6 @@ async def _update_message(params: dict) -> dict:
     client = GraphClient(token)
     message_id = params["message_id"]
 
-    # Build patch body from only the supplied optional fields
     patch: dict = {}
     if "is_read" in params:
         patch["isRead"] = params["is_read"]
@@ -222,6 +407,77 @@ async def _update_message(params: dict) -> dict:
         "importance": result.get("importance"),
         "categories": result.get("categories"),
         "flag": result.get("flag"),
+    }
+
+
+async def _delete_message(params: dict) -> dict:
+    """DELETE /me/messages/{id} — moves message to Deleted Items."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+    await client.delete(f"/me/messages/{message_id}")
+    return {"deleted": True, "message_id": message_id}
+
+
+async def _move_message(params: dict) -> dict:
+    """POST /me/messages/{id}/move — move to a different folder."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+    body = {"destinationId": params["destination_folder"]}
+    result = await client.post(f"/me/messages/{message_id}/move", json=body)
+    return {
+        "id": result.get("id"),
+        "subject": result.get("subject"),
+        "parentFolderId": result.get("parentFolderId"),
+    }
+
+
+async def _reply_mail(params: dict) -> dict:
+    """POST /me/messages/{id}/reply or /replyAll."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+    action = "replyAll" if params.get("reply_all") else "reply"
+    body = {"comment": params["comment"]}
+    await client.post(f"/me/messages/{message_id}/{action}", json=body)
+    return {"replied": True, "action": action, "message_id": message_id}
+
+
+async def _forward_mail(params: dict) -> dict:
+    """POST /me/messages/{id}/forward."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+    to_recipients = [
+        {"emailAddress": {"address": addr}} for addr in params["to"]
+    ]
+    body = {"toRecipients": to_recipients}
+    if params.get("comment"):
+        body["comment"] = params["comment"]
+    await client.post(f"/me/messages/{message_id}/forward", json=body)
+    return {"forwarded": True, "to": params["to"], "message_id": message_id}
+
+
+async def _list_mail_folders(params: dict) -> dict:
+    """GET /me/mailFolders — list mail folders."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    top = params.get("top", 25)
+    data = await client.get(f"/me/mailFolders?$top={top}")
+    folders = data.get("value", [])
+    return {
+        "count": len(folders),
+        "folders": [
+            {
+                "id": f.get("id"),
+                "displayName": f.get("displayName"),
+                "totalItemCount": f.get("totalItemCount"),
+                "unreadItemCount": f.get("unreadItemCount"),
+                "parentFolderId": f.get("parentFolderId"),
+            }
+            for f in folders
+        ],
     }
 
 
@@ -286,10 +542,68 @@ async def _create_event(params: dict) -> dict:
     }
 
 
+async def _update_event(params: dict) -> dict:
+    """PATCH /me/events/{id} — update event properties."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    event_id = params["event_id"]
+    tz = params.get("timezone", "America/Los_Angeles")
+
+    patch: dict = {}
+    if "subject" in params:
+        patch["subject"] = params["subject"]
+    if "start" in params:
+        patch["start"] = {"dateTime": params["start"], "timeZone": tz}
+    if "end" in params:
+        patch["end"] = {"dateTime": params["end"], "timeZone": tz}
+    if "body" in params:
+        patch["body"] = {"contentType": "HTML", "content": params["body"]}
+    if "location" in params:
+        patch["location"] = {"displayName": params["location"]}
+    if "attendees" in params:
+        patch["attendees"] = [
+            {"emailAddress": {"address": a}, "type": "required"}
+            for a in params["attendees"]
+        ]
+    if "is_online_meeting" in params:
+        patch["isOnlineMeeting"] = params["is_online_meeting"]
+        if params["is_online_meeting"]:
+            patch["onlineMeetingProvider"] = "teamsForBusiness"
+
+    if not patch:
+        return {"error": "No updatable properties provided"}
+
+    result = await client.patch(f"/me/events/{event_id}", json=patch)
+    return {
+        "id": result.get("id"),
+        "subject": result.get("subject"),
+        "start": result.get("start"),
+        "end": result.get("end"),
+        "webLink": result.get("webLink"),
+    }
+
+
+async def _delete_event(params: dict) -> dict:
+    """DELETE /me/events/{id} — delete a calendar event."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    event_id = params["event_id"]
+    await client.delete(f"/me/events/{event_id}")
+    return {"deleted": True, "event_id": event_id}
+
+
 HANDLERS = {
     "outlook_list_mail": _list_mail,
+    "outlook_get_message": _get_message,
     "outlook_send_mail": _send_mail,
     "outlook_update_message": _update_message,
+    "outlook_delete_message": _delete_message,
+    "outlook_move_message": _move_message,
+    "outlook_reply_mail": _reply_mail,
+    "outlook_forward_mail": _forward_mail,
+    "outlook_list_mail_folders": _list_mail_folders,
     "outlook_list_calendar_events": _list_calendar_events,
     "outlook_create_event": _create_event,
+    "outlook_update_event": _update_event,
+    "outlook_delete_event": _delete_event,
 }
