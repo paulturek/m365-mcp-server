@@ -1,6 +1,7 @@
 """Microsoft To Do MCP tools.
 
-Covers: list task lists, list tasks, create task, update task.
+Covers: list task lists, list tasks, create task, update task,
+        complete task, delete task, create list, delete list.
 """
 import logging
 
@@ -62,7 +63,7 @@ TOOLS = [
     },
     {
         "name": "todo_update_task",
-        "description": "Update an existing task (mark complete, change title, etc.).",
+        "description": "Update an existing task (change title, status, importance, due date, body).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -81,7 +82,66 @@ TOOLS = [
             "required": ["user_id", "list_id", "task_id"],
         },
     },
+    {
+        "name": "todo_complete_task",
+        "description": "Mark a task as completed (convenience wrapper).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "list_id": {"type": "string", "description": "Task list ID"},
+                "task_id": {"type": "string", "description": "Task ID"},
+            },
+            "required": ["user_id", "list_id", "task_id"],
+        },
+    },
+    {
+        "name": "todo_delete_task",
+        "description": "Delete a task from a To Do list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "list_id": {"type": "string", "description": "Task list ID"},
+                "task_id": {"type": "string", "description": "Task ID"},
+            },
+            "required": ["user_id", "list_id", "task_id"],
+        },
+    },
+    {
+        "name": "todo_create_list",
+        "description": "Create a new To Do task list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "display_name": {
+                    "type": "string",
+                    "description": "Name for the new task list",
+                },
+            },
+            "required": ["user_id", "display_name"],
+        },
+    },
+    {
+        "name": "todo_delete_list",
+        "description": "Delete a To Do task list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "list_id": {
+                    "type": "string",
+                    "description": "Task list ID to delete",
+                },
+            },
+            "required": ["user_id", "list_id"],
+        },
+    },
 ]
+
+
+# ---- Handlers -----------------------------------------------------------
 
 
 async def _list_task_lists(params: dict) -> dict:
@@ -183,9 +243,62 @@ async def _update_task(params: dict) -> dict:
     }
 
 
+async def _complete_task(params: dict) -> dict:
+    """Convenience: mark a task as completed."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    list_id = params["list_id"]
+    task_id = params["task_id"]
+    result = await client.patch(
+        f"/me/todo/lists/{list_id}/tasks/{task_id}",
+        json={"status": "completed"},
+    )
+    return {
+        "id": result.get("id"),
+        "title": result.get("title"),
+        "status": result.get("status"),
+        "completedDateTime": result.get("completedDateTime"),
+    }
+
+
+async def _delete_task(params: dict) -> dict:
+    """DELETE /me/todo/lists/{listId}/tasks/{taskId}."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    list_id = params["list_id"]
+    task_id = params["task_id"]
+    await client.delete(f"/me/todo/lists/{list_id}/tasks/{task_id}")
+    return {"deleted": True, "task_id": task_id}
+
+
+async def _create_list(params: dict) -> dict:
+    """POST /me/todo/lists — create a new task list."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    body = {"displayName": params["display_name"]}
+    result = await client.post("/me/todo/lists", json=body)
+    return {
+        "id": result.get("id"),
+        "displayName": result.get("displayName"),
+    }
+
+
+async def _delete_list(params: dict) -> dict:
+    """DELETE /me/todo/lists/{listId}."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    list_id = params["list_id"]
+    await client.delete(f"/me/todo/lists/{list_id}")
+    return {"deleted": True, "list_id": list_id}
+
+
 HANDLERS = {
     "todo_list_task_lists": _list_task_lists,
     "todo_list_tasks": _list_tasks,
     "todo_create_task": _create_task,
     "todo_update_task": _update_task,
+    "todo_complete_task": _complete_task,
+    "todo_delete_task": _delete_task,
+    "todo_create_list": _create_list,
+    "todo_delete_list": _delete_list,
 }
