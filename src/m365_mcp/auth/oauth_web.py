@@ -171,7 +171,7 @@ async def login(
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
         state=state,
-        prompt="consent",
+        prompt="select_account",
         login_hint=user_id if "@" in user_id else None,
     )
     return RedirectResponse(auth_url)
