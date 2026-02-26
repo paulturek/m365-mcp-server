@@ -1,6 +1,6 @@
 """Outlook MCP tools.
 
-Covers: mail listing, send, calendar events.
+Covers: mail listing, send, update, calendar events.
 """
 import logging
 
@@ -54,6 +54,49 @@ TOOLS = [
                 "cc": {"type": "array", "items": {"type": "string"}, "description": "CC addresses"},
             },
             "required": ["user_id", "to", "subject", "body"],
+        },
+    },
+    {
+        "name": "outlook_update_message",
+        "description": (
+            "Update properties of an existing email message. "
+            "Supports marking read/unread, setting importance, "
+            "managing categories, and toggling follow-up flags."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_USER_ID_PROP,
+                "message_id": {
+                    "type": "string",
+                    "description": "The Graph message ID to update",
+                },
+                "is_read": {
+                    "type": "boolean",
+                    "description": "Mark message as read (true) or unread (false)",
+                },
+                "importance": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high"],
+                    "description": "Message importance level",
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Outlook category labels to assign",
+                },
+                "flag": {
+                    "type": "object",
+                    "description": "Follow-up flag. Example: {\"flagStatus\": \"flagged\"}",
+                    "properties": {
+                        "flagStatus": {
+                            "type": "string",
+                            "enum": ["notFlagged", "flagged", "complete"],
+                        }
+                    },
+                },
+            },
+            "required": ["user_id", "message_id"],
         },
     },
     {
@@ -151,6 +194,37 @@ async def _send_mail(params: dict) -> dict:
     return {"sent": True, "to": params["to"], "subject": params["subject"]}
 
 
+async def _update_message(params: dict) -> dict:
+    """PATCH /me/messages/{id} — update mutable message properties."""
+    token = await get_access_token(params["user_id"])
+    client = GraphClient(token)
+    message_id = params["message_id"]
+
+    # Build patch body from only the supplied optional fields
+    patch: dict = {}
+    if "is_read" in params:
+        patch["isRead"] = params["is_read"]
+    if "importance" in params:
+        patch["importance"] = params["importance"]
+    if "categories" in params:
+        patch["categories"] = params["categories"]
+    if "flag" in params:
+        patch["flag"] = params["flag"]
+
+    if not patch:
+        return {"error": "No updatable properties provided"}
+
+    result = await client.patch(f"/me/messages/{message_id}", json=patch)
+    return {
+        "id": result.get("id"),
+        "subject": result.get("subject"),
+        "isRead": result.get("isRead"),
+        "importance": result.get("importance"),
+        "categories": result.get("categories"),
+        "flag": result.get("flag"),
+    }
+
+
 async def _list_calendar_events(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
@@ -215,6 +289,7 @@ async def _create_event(params: dict) -> dict:
 HANDLERS = {
     "outlook_list_mail": _list_mail,
     "outlook_send_mail": _send_mail,
+    "outlook_update_message": _update_message,
     "outlook_list_calendar_events": _list_calendar_events,
     "outlook_create_event": _create_event,
 }
