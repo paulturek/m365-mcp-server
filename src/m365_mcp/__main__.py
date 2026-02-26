@@ -51,7 +51,7 @@ logger = logging.getLogger("m365_mcp")
 # ---------------------------------------------------------------------------
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "m365-mcp-server"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.0.1"
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -158,11 +158,24 @@ async def _handle_tools_call(params: dict) -> dict:
         }
 
 
+async def _handle_ping(params: dict) -> dict:
+    """Respond to MCP ping requests."""
+    return {}
+
+
 # Method dispatch table
 _MCP_METHODS = {
     "initialize": _handle_initialize,
     "tools/list": _handle_tools_list,
     "tools/call": _handle_tools_call,
+    "ping": _handle_ping,
+}
+
+# Notifications the server should silently accept (no id, no response expected)
+_MCP_NOTIFICATIONS = {
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
 }
 
 
@@ -179,6 +192,16 @@ async def mcp_handler(request: Request):
     method = body.get("method", "")
     params = body.get("params", {})
     req_id = body.get("id")
+
+    # JSON-RPC notifications (no id) — accept silently
+    if req_id is None and method in _MCP_NOTIFICATIONS:
+        logger.debug("Notification received: %s", method)
+        return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
+
+    # Any other notification without id — accept silently, don't 400
+    if req_id is None and method not in _MCP_METHODS:
+        logger.debug("Unknown notification ignored: %s", method)
+        return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
 
     handler = _MCP_METHODS.get(method)
     if not handler:
