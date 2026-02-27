@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 def _encode_id(entity_id: str) -> str:
     """URL-encode a Graph entity ID for safe use in URL path segments.
 
-    Graph IDs are base64 strings that may contain -, _, /
-    which must be percent-encoded when used in URL paths.
+    Only encodes characters invalid in RFC 3986 path segments (like /).
+    Preserves =, +, -, _ which are path-safe. Over-encoding = (base64
+    padding) causes Graph to return ErrorInvalidIdMalformed.
     """
-    return quote(entity_id, safe='')
+    return quote(entity_id, safe=":@!$&'()*+,;=")
 
 
 _USER_ID_PROP = {
