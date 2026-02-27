@@ -4,11 +4,22 @@ Covers: mail listing, reading, send, update, move, reply, forward, delete,
         calendar events (list, create, update, delete), mail folders.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_id(entity_id: str) -> str:
+    """URL-encode a Graph entity ID for safe use in URL path segments.
+
+    Graph IDs are base64 strings that may contain -, _, /
+    which must be percent-encoded when used in URL paths.
+    """
+    return quote(entity_id, safe='')
+
 
 _USER_ID_PROP = {
     "user_id": {
@@ -352,7 +363,7 @@ async def _get_message(params: dict) -> dict:
     """GET /me/messages/{id} — full message with body."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
     data = await client.get(f"/me/messages/{message_id}")
     return {
         "id": data.get("id"),
@@ -409,7 +420,7 @@ async def _update_message(params: dict) -> dict:
     """PATCH /me/messages/{id} — update mutable message properties."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
 
     patch: dict = {}
     if "is_read" in params:
@@ -439,16 +450,16 @@ async def _delete_message(params: dict) -> dict:
     """DELETE /me/messages/{id} — moves message to Deleted Items."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
     await client.delete(f"/me/messages/{message_id}")
-    return {"deleted": True, "message_id": message_id}
+    return {"deleted": True, "message_id": params["message_id"]}
 
 
 async def _move_message(params: dict) -> dict:
     """POST /me/messages/{id}/move — move to a different folder."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
     body = {"destinationId": params["destination_folder"]}
     result = await client.post(f"/me/messages/{message_id}/move", json=body)
     return {
@@ -462,18 +473,18 @@ async def _reply_mail(params: dict) -> dict:
     """POST /me/messages/{id}/reply or /replyAll."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
     action = "replyAll" if params.get("reply_all") else "reply"
     body = {"comment": params["comment"]}
     await client.post(f"/me/messages/{message_id}/{action}", json=body)
-    return {"replied": True, "action": action, "message_id": message_id}
+    return {"replied": True, "action": action, "message_id": params["message_id"]}
 
 
 async def _forward_mail(params: dict) -> dict:
     """POST /me/messages/{id}/forward."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    message_id = params["message_id"]
+    message_id = _encode_id(params["message_id"])
     to_recipients = [
         {"emailAddress": {"address": addr}} for addr in params["to"]
     ]
@@ -481,7 +492,7 @@ async def _forward_mail(params: dict) -> dict:
     if params.get("comment"):
         body["comment"] = params["comment"]
     await client.post(f"/me/messages/{message_id}/forward", json=body)
-    return {"forwarded": True, "to": params["to"], "message_id": message_id}
+    return {"forwarded": True, "to": params["to"], "message_id": params["message_id"]}
 
 
 async def _list_mail_folders(params: dict) -> dict:
@@ -571,7 +582,7 @@ async def _update_event(params: dict) -> dict:
     """PATCH /me/events/{id} — update event properties."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    event_id = params["event_id"]
+    event_id = _encode_id(params["event_id"])
     tz = params.get("timezone", "America/Los_Angeles")
 
     patch: dict = {}
@@ -612,9 +623,9 @@ async def _delete_event(params: dict) -> dict:
     """DELETE /me/events/{id} — delete a calendar event."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    event_id = params["event_id"]
+    event_id = _encode_id(params["event_id"])
     await client.delete(f"/me/events/{event_id}")
-    return {"deleted": True, "event_id": event_id}
+    return {"deleted": True, "event_id": params["event_id"]}
 
 
 HANDLERS = {
