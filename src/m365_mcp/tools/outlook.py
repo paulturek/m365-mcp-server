@@ -15,11 +15,19 @@ logger = logging.getLogger(__name__)
 def _encode_id(entity_id: str) -> str:
     """URL-encode a Graph entity ID for safe use in URL path segments.
 
-    Only encodes characters invalid in RFC 3986 path segments (like /).
-    Preserves =, +, -, _ which are path-safe. Over-encoding = (base64
-    padding) causes Graph to return ErrorInvalidIdMalformed.
+    Encodes / and other reserved path characters.  Note: Python's
+    quote() considers -, _, ., ~ as always-safe (unreserved per RFC 3986)
+    and never encodes them regardless of the safe parameter.
     """
-    return quote(entity_id, safe=":@!$&'()*+,;=")
+    return quote(entity_id, safe='')
+
+
+# Immutable IDs give a stable, format-consistent identifier for every
+# mailbox item regardless of the backend store.  The header tells Graph
+# to *return* immutable IDs in responses AND to *interpret* IDs in
+# request URLs as immutable.  This prevents ErrorInvalidIdMalformed
+# on IDs whose default restId format varies across mailbox backends.
+_IMMUTABLE_HEADERS = {"Prefer": 'IdType="ImmutableId"'}
 
 
 _USER_ID_PROP = {
@@ -330,10 +338,6 @@ async def _list_mail(params: dict) -> dict:
     top = params.get("top", 10)
     has_search = bool(params.get("search"))
 
-    # Graph API mutual exclusions:
-    # - $search cannot be combined with $orderby (400 SearchWithOrderBy)
-    # - $search cannot be combined with $filter (400)
-    # When searching, Graph returns results by relevance ranking.
     if has_search:
         qp = f"?$top={top}&$search=\"{params['search']}\""
     else:
@@ -341,7 +345,10 @@ async def _list_mail(params: dict) -> dict:
         if params.get("filter"):
             qp += f"&$filter={params['filter']}"
 
-    data = await client.get(f"/me/mailFolders/{folder}/messages{qp}")
+    data = await client.get(
+        f"/me/mailFolders/{folder}/messages{qp}",
+        headers=_IMMUTABLE_HEADERS,
+    )
     messages = data.get("value", [])
     return {
         "count": len(messages),
@@ -365,7 +372,10 @@ async def _get_message(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     message_id = _encode_id(params["message_id"])
-    data = await client.get(f"/me/messages/{message_id}")
+    data = await client.get(
+        f"/me/messages/{message_id}",
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {
         "id": data.get("id"),
         "subject": data.get("subject"),
@@ -413,7 +423,7 @@ async def _send_mail(params: dict) -> dict:
     }
     if cc_recipients:
         body["message"]["ccRecipients"] = cc_recipients
-    await client.post("/me/sendMail", json=body)
+    await client.post("/me/sendMail", json=body, headers=_IMMUTABLE_HEADERS)
     return {"sent": True, "to": params["to"], "subject": params["subject"]}
 
 
@@ -436,7 +446,11 @@ async def _update_message(params: dict) -> dict:
     if not patch:
         return {"error": "No updatable properties provided"}
 
-    result = await client.patch(f"/me/messages/{message_id}", json=patch)
+    result = await client.patch(
+        f"/me/messages/{message_id}",
+        json=patch,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {
         "id": result.get("id"),
         "subject": result.get("subject"),
@@ -452,7 +466,10 @@ async def _delete_message(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     message_id = _encode_id(params["message_id"])
-    await client.delete(f"/me/messages/{message_id}")
+    await client.delete(
+        f"/me/messages/{message_id}",
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {"deleted": True, "message_id": params["message_id"]}
 
 
@@ -462,7 +479,11 @@ async def _move_message(params: dict) -> dict:
     client = GraphClient(token)
     message_id = _encode_id(params["message_id"])
     body = {"destinationId": params["destination_folder"]}
-    result = await client.post(f"/me/messages/{message_id}/move", json=body)
+    result = await client.post(
+        f"/me/messages/{message_id}/move",
+        json=body,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {
         "id": result.get("id"),
         "subject": result.get("subject"),
@@ -477,7 +498,11 @@ async def _reply_mail(params: dict) -> dict:
     message_id = _encode_id(params["message_id"])
     action = "replyAll" if params.get("reply_all") else "reply"
     body = {"comment": params["comment"]}
-    await client.post(f"/me/messages/{message_id}/{action}", json=body)
+    await client.post(
+        f"/me/messages/{message_id}/{action}",
+        json=body,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {"replied": True, "action": action, "message_id": params["message_id"]}
 
 
@@ -492,7 +517,11 @@ async def _forward_mail(params: dict) -> dict:
     body = {"toRecipients": to_recipients}
     if params.get("comment"):
         body["comment"] = params["comment"]
-    await client.post(f"/me/messages/{message_id}/forward", json=body)
+    await client.post(
+        f"/me/messages/{message_id}/forward",
+        json=body,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {"forwarded": True, "to": params["to"], "message_id": params["message_id"]}
 
 
@@ -501,7 +530,10 @@ async def _list_mail_folders(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     top = params.get("top", 25)
-    data = await client.get(f"/me/mailFolders?$top={top}")
+    data = await client.get(
+        f"/me/mailFolders?$top={top}",
+        headers=_IMMUTABLE_HEADERS,
+    )
     folders = data.get("value", [])
     return {
         "count": len(folders),
@@ -528,7 +560,7 @@ async def _list_calendar_events(params: dict) -> dict:
         endpoint = f"/me/calendarView?startDateTime={start}&endDateTime={end}&$top={top}&$orderby=start/dateTime"
     else:
         endpoint = f"/me/events?$top={top}&$orderby=start/dateTime"
-    data = await client.get(endpoint)
+    data = await client.get(endpoint, headers=_IMMUTABLE_HEADERS)
     events = data.get("value", [])
     return {
         "count": len(events),
@@ -569,7 +601,11 @@ async def _create_event(params: dict) -> dict:
     if params.get("is_online_meeting"):
         body["isOnlineMeeting"] = True
         body["onlineMeetingProvider"] = "teamsForBusiness"
-    result = await client.post("/me/events", json=body)
+    result = await client.post(
+        "/me/events",
+        json=body,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {
         "id": result.get("id"),
         "subject": result.get("subject"),
@@ -610,7 +646,11 @@ async def _update_event(params: dict) -> dict:
     if not patch:
         return {"error": "No updatable properties provided"}
 
-    result = await client.patch(f"/me/events/{event_id}", json=patch)
+    result = await client.patch(
+        f"/me/events/{event_id}",
+        json=patch,
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {
         "id": result.get("id"),
         "subject": result.get("subject"),
@@ -625,7 +665,10 @@ async def _delete_event(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     event_id = _encode_id(params["event_id"])
-    await client.delete(f"/me/events/{event_id}")
+    await client.delete(
+        f"/me/events/{event_id}",
+        headers=_IMMUTABLE_HEADERS,
+    )
     return {"deleted": True, "event_id": params["event_id"]}
 
 
