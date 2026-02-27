@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 def _encode_id(entity_id: str) -> str:
-    """URL-encode a Graph entity ID for safe use in URL path segments."""
-    return quote(entity_id, safe='')
+    """URL-encode a Graph entity ID for safe use in URL path segments.
+
+    Only encodes characters invalid in RFC 3986 path segments (like /).
+    Preserves =, +, -, _ which are path-safe.
+    """
+    return quote(entity_id, safe=":@!$&'()*+,;=")
 
 
 _USER_ID_PROP = {
