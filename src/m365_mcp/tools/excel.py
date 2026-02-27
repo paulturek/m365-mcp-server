@@ -5,6 +5,7 @@ Covers: workbook info, read range, write range, create chart,
         add table rows, create worksheet, delete worksheet.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
@@ -28,11 +29,11 @@ TOOLS = [
                 **_USER_ID_PROP,
                 "item_path": {
                     "type": "string",
-                    "description": "OneDrive path to the workbook",
+                    "description": "OneDrive path to the workbook (e.g. '/Documents/Budget 2026.xlsx')",
                 },
                 "item_id": {
                     "type": "string",
-                    "description": "OneDrive item ID (alternative)",
+                    "description": "OneDrive item ID (alternative to item_path)",
                 },
             },
             "required": ["user_id"],
@@ -154,9 +155,10 @@ TOOLS = [
 
 
 def _workbook_base(params: dict) -> str:
+    """Build the workbook base URL, URL-encoding the path to handle spaces and special chars."""
     if params.get("item_id"):
         return f"/me/drive/items/{params['item_id']}/workbook"
-    path = params.get("item_path", "").strip("/")
+    path = quote(params.get("item_path", "").strip("/"), safe="/")
     return f"/me/drive/root:/{path}:/workbook"
 
 
@@ -199,8 +201,10 @@ async def _write_range(params: dict) -> dict:
     base = _workbook_base(params)
     ws = params.get("worksheet", "Sheet1")
     rng = params["range"]
-    body = {"values": params["values"]}
-    data = await client.patch(f"{base}/worksheets/{ws}/range(address='{rng}')", json=body)
+    data = await client.patch(
+        f"{base}/worksheets/{ws}/range(address='{rng}')",
+        json={"values": params["values"]},
+    )
     return {
         "address": data.get("address"),
         "rowCount": data.get("rowCount"),
@@ -236,9 +240,10 @@ async def _add_table_rows(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     base = _workbook_base(params)
-    table_name = params["table_name"]
-    body = {"values": params["values"]}
-    result = await client.post(f"{base}/tables/{table_name}/rows", json=body)
+    result = await client.post(
+        f"{base}/tables/{params['table_name']}/rows",
+        json={"values": params["values"]},
+    )
     return {
         "index": result.get("index"),
         "values": result.get("values"),
@@ -250,8 +255,7 @@ async def _create_worksheet(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     base = _workbook_base(params)
-    body = {"name": params["name"]}
-    result = await client.post(f"{base}/worksheets", json=body)
+    result = await client.post(f"{base}/worksheets", json={"name": params["name"]})
     return {
         "name": result.get("name"),
         "id": result.get("id"),
