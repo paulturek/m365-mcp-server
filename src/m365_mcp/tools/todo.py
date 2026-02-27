@@ -4,11 +4,18 @@ Covers: list task lists, list tasks, create task, update task,
         complete task, delete task, create list, delete list.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_id(entity_id: str) -> str:
+    """URL-encode a Graph entity ID for safe use in URL path segments."""
+    return quote(entity_id, safe='')
+
 
 _USER_ID_PROP = {
     "user_id": {
@@ -166,7 +173,7 @@ async def _list_task_lists(params: dict) -> dict:
 async def _list_tasks(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
+    list_id = _encode_id(params["list_id"])
     top = params.get("top", 25)
     qp = f"?$top={top}"
     if params.get("filter"):
@@ -193,7 +200,7 @@ async def _list_tasks(params: dict) -> dict:
 async def _create_task(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
+    list_id = _encode_id(params["list_id"])
     body: dict = {"title": params["title"]}
     if params.get("body"):
         body["body"] = {"content": params["body"], "contentType": "text"}
@@ -215,8 +222,8 @@ async def _create_task(params: dict) -> dict:
 async def _update_task(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
-    task_id = params["task_id"]
+    list_id = _encode_id(params["list_id"])
+    task_id = _encode_id(params["task_id"])
     body: dict = {}
     if params.get("title"):
         body["title"] = params["title"]
@@ -247,8 +254,8 @@ async def _complete_task(params: dict) -> dict:
     """Convenience: mark a task as completed."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
-    task_id = params["task_id"]
+    list_id = _encode_id(params["list_id"])
+    task_id = _encode_id(params["task_id"])
     result = await client.patch(
         f"/me/todo/lists/{list_id}/tasks/{task_id}",
         json={"status": "completed"},
@@ -265,10 +272,10 @@ async def _delete_task(params: dict) -> dict:
     """DELETE /me/todo/lists/{listId}/tasks/{taskId}."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
-    task_id = params["task_id"]
+    list_id = _encode_id(params["list_id"])
+    task_id = _encode_id(params["task_id"])
     await client.delete(f"/me/todo/lists/{list_id}/tasks/{task_id}")
-    return {"deleted": True, "task_id": task_id}
+    return {"deleted": True, "task_id": params["task_id"]}
 
 
 async def _create_list(params: dict) -> dict:
@@ -287,9 +294,9 @@ async def _delete_list(params: dict) -> dict:
     """DELETE /me/todo/lists/{listId}."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    list_id = params["list_id"]
+    list_id = _encode_id(params["list_id"])
     await client.delete(f"/me/todo/lists/{list_id}")
-    return {"deleted": True, "list_id": list_id}
+    return {"deleted": True, "list_id": params["list_id"]}
 
 
 HANDLERS = {
