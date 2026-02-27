@@ -4,6 +4,7 @@ Covers: list files/folders, download, upload, delete, create folder, share,
         move, rename, copy, search.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
@@ -17,6 +18,12 @@ _USER_ID_PROP = {
         "description": "Your user identifier (email recommended)",
     }
 }
+
+
+def _encode_path(path: str) -> str:
+    """URL-encode a OneDrive path, preserving forward slashes."""
+    return quote(path, safe="/")
+
 
 # ---- Tool definitions ---------------------------------------------------
 
@@ -252,7 +259,8 @@ def _resolve_item_endpoint(params: dict) -> str | None:
     if params.get("item_id"):
         return f"/me/drive/items/{params['item_id']}"
     if params.get("item_path"):
-        return f"/me/drive/root:/{params['item_path'].strip('/')}"
+        encoded = _encode_path(params["item_path"].strip("/"))
+        return f"/me/drive/root:/{encoded}"
     return None
 
 
@@ -263,11 +271,11 @@ async def _list_files(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     path = params.get("path", "/")
-    endpoint = (
-        "/me/drive/root/children"
-        if path in ("/", "")
-        else f"/me/drive/root:/{path.strip('/')}:/children"
-    )
+    if path in ("/", ""):
+        endpoint = "/me/drive/root/children"
+    else:
+        encoded = _encode_path(path.strip("/"))
+        endpoint = f"/me/drive/root:/{encoded}:/children"
     data = await client.get(endpoint)
     items = data.get("value", [])
     return {
@@ -293,11 +301,10 @@ async def _download_file(params: dict) -> dict:
     if not endpoint:
         return {"error": "Provide item_path or item_id"}
     meta = await client.get(endpoint)
-    download_url = meta.get("@microsoft.graph.downloadUrl", "")
     return {
         "name": meta.get("name"),
         "size": meta.get("size"),
-        "downloadUrl": download_url,
+        "downloadUrl": meta.get("@microsoft.graph.downloadUrl", ""),
         "mimeType": meta.get("file", {}).get("mimeType"),
         "webUrl": meta.get("webUrl"),
     }
@@ -308,7 +315,7 @@ async def _upload_file(params: dict) -> dict:
 
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    path = params["path"].strip("/")
+    path = _encode_path(params["path"].strip("/"))
     content_bytes = base64.b64decode(params["content"])
     endpoint = f"/me/drive/root:/{path}:/content"
     result = await client.put(endpoint, data=content_bytes)
@@ -334,11 +341,11 @@ async def _create_folder(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     parent = params.get("parent_path", "/").strip("/")
-    parent_endpoint = (
-        "/me/drive/root/children"
-        if parent in ("", "/")
-        else f"/me/drive/root:/{parent}:/children"
-    )
+    if parent in ("", "/"):
+        parent_endpoint = "/me/drive/root/children"
+    else:
+        encoded = _encode_path(parent)
+        parent_endpoint = f"/me/drive/root:/{encoded}:/children"
     body = {
         "name": params["folder_name"],
         "folder": {},
@@ -355,11 +362,11 @@ async def _create_folder(params: dict) -> dict:
 async def _share_item(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    # Build createLink endpoint — different format for ID vs path
     if params.get("item_id"):
         endpoint = f"/me/drive/items/{params['item_id']}/createLink"
     elif params.get("item_path"):
-        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}:/createLink"
+        encoded = _encode_path(params["item_path"].strip("/"))
+        endpoint = f"/me/drive/root:/{encoded}:/createLink"
     else:
         return {"error": "Provide item_path or item_id"}
     body = {
@@ -387,13 +394,8 @@ async def _move_item(params: dict) -> dict:
     if params.get("destination_id"):
         patch["parentReference"] = {"id": params["destination_id"]}
     elif params.get("destination_path"):
-        # Resolve destination folder ID first
-        dest_path = params["destination_path"].strip("/")
-        dest_endpoint = (
-            "/me/drive/root"
-            if dest_path in ("", "/")
-            else f"/me/drive/root:/{dest_path}"
-        )
+        dest_path = _encode_path(params["destination_path"].strip("/"))
+        dest_endpoint = "/me/drive/root" if dest_path in ("", "/") else f"/me/drive/root:/{dest_path}"
         dest_meta = await client.get(dest_endpoint)
         patch["parentReference"] = {"id": dest_meta.get("id")}
     else:
@@ -415,7 +417,6 @@ async def _rename_item(params: dict) -> dict:
     endpoint = _resolve_item_endpoint(params)
     if not endpoint:
         return {"error": "Provide item_path or item_id"}
-
     result = await client.patch(endpoint, json={"name": params["new_name"]})
     return {
         "id": result.get("id"),
@@ -432,7 +433,8 @@ async def _copy_item(params: dict) -> dict:
     if params.get("item_id"):
         endpoint = f"/me/drive/items/{params['item_id']}/copy"
     elif params.get("item_path"):
-        endpoint = f"/me/drive/root:/{params['item_path'].strip('/')}:/copy"
+        encoded = _encode_path(params["item_path"].strip("/"))
+        endpoint = f"/me/drive/root:/{encoded}:/copy"
     else:
         return {"error": "Provide item_path or item_id"}
 
@@ -440,12 +442,8 @@ async def _copy_item(params: dict) -> dict:
     if params.get("destination_id"):
         body["parentReference"] = {"id": params["destination_id"]}
     elif params.get("destination_path"):
-        dest_path = params["destination_path"].strip("/")
-        dest_endpoint = (
-            "/me/drive/root"
-            if dest_path in ("", "/")
-            else f"/me/drive/root:/{dest_path}"
-        )
+        dest_path = _encode_path(params["destination_path"].strip("/"))
+        dest_endpoint = "/me/drive/root" if dest_path in ("", "/") else f"/me/drive/root:/{dest_path}"
         dest_meta = await client.get(dest_endpoint)
         body["parentReference"] = {"id": dest_meta.get("id")}
     else:
@@ -454,8 +452,7 @@ async def _copy_item(params: dict) -> dict:
     if params.get("new_name"):
         body["name"] = params["new_name"]
 
-    # Copy returns 202 Accepted with a Location header for monitoring
-    result = await client.post(endpoint, json=body)
+    await client.post(endpoint, json=body)
     return {
         "accepted": True,
         "message": "Copy operation started. It may take a moment to complete.",
@@ -466,9 +463,13 @@ async def _search(params: dict) -> dict:
     """GET /me/drive/root/search(q='...') — search OneDrive."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    query = params["query"]
+    # Pass query via params= dict so httpx handles encoding of special chars
     top = params.get("top", 25)
-    data = await client.get(f"/me/drive/root/search(q='{query}')?$top={top}")
+    query = params["query"]
+    data = await client.get(
+        f"/me/drive/root/search(q='{quote(query, safe='')}')",
+        params={"$top": top},
+    )
     items = data.get("value", [])
     return {
         "count": len(items),
