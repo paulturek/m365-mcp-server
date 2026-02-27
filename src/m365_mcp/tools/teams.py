@@ -4,11 +4,18 @@ Covers: list joined teams, list channels, send channel message,
         read channel messages, list chats, read chat messages, send chat message.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_id(entity_id: str) -> str:
+    """URL-encode a Graph entity ID for safe use in URL path segments."""
+    return quote(entity_id, safe='')
+
 
 _USER_ID_PROP = {
     "user_id": {
@@ -147,7 +154,7 @@ async def _list_teams(params: dict) -> dict:
 async def _list_channels(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    team_id = params["team_id"]
+    team_id = _encode_id(params["team_id"])
     data = await client.get(f"/teams/{team_id}/channels")
     channels = data.get("value", [])
     return {
@@ -168,8 +175,8 @@ async def _list_channels(params: dict) -> dict:
 async def _send_message(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    team_id = params["team_id"]
-    channel_id = params["channel_id"]
+    team_id = _encode_id(params["team_id"])
+    channel_id = _encode_id(params["channel_id"])
     body = {
         "body": {
             "contentType": params.get("content_type", "html"),
@@ -190,8 +197,8 @@ async def _list_channel_messages(params: dict) -> dict:
     """GET /teams/{id}/channels/{id}/messages — list channel messages."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    team_id = params["team_id"]
-    channel_id = params["channel_id"]
+    team_id = _encode_id(params["team_id"])
+    channel_id = _encode_id(params["channel_id"])
     top = params.get("top", 20)
     data = await client.get(
         f"/teams/{team_id}/channels/{channel_id}/messages?$top={top}"
@@ -256,7 +263,7 @@ async def _list_chat_messages(params: dict) -> dict:
     """GET /me/chats/{id}/messages — list messages in a chat."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    chat_id = params["chat_id"]
+    chat_id = _encode_id(params["chat_id"])
     top = params.get("top", 20)
     data = await client.get(f"/me/chats/{chat_id}/messages?$top={top}")
     messages = data.get("value", [])
@@ -283,7 +290,7 @@ async def _send_chat_message(params: dict) -> dict:
     """POST /me/chats/{id}/messages — send a message in a chat."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    chat_id = params["chat_id"]
+    chat_id = _encode_id(params["chat_id"])
     body = {
         "body": {
             "contentType": params.get("content_type", "html"),
