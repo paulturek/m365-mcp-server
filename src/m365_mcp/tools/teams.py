@@ -80,6 +80,11 @@ TOOLS = [
             "properties": {
                 **_USER_ID_PROP,
                 "top": {"type": "integer", "default": 25, "description": "Max chats to return"},
+                "include_members": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include chat member names (requires ChatMember.Read.All permission)",
+                },
             },
             "required": ["user_id"],
         },
@@ -213,11 +218,20 @@ async def _list_channel_messages(params: dict) -> dict:
 
 
 async def _list_chats(params: dict) -> dict:
-    """GET /me/chats — list user's 1:1 and group chats."""
+    """GET /me/chats — list user's 1:1 and group chats.
+
+    $expand=members requires ChatMember.Read.All — made optional via include_members param.
+    """
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     top = params.get("top", 25)
-    data = await client.get(f"/me/chats?$top={top}&$expand=members")
+    include_members = params.get("include_members", False)
+
+    endpoint = f"/me/chats?$top={top}"
+    if include_members:
+        endpoint += "&$expand=members"
+
+    data = await client.get(endpoint)
     chats = data.get("value", [])
     return {
         "count": len(chats),
@@ -228,10 +242,10 @@ async def _list_chats(params: dict) -> dict:
                 "chatType": c.get("chatType"),
                 "createdDateTime": c.get("createdDateTime"),
                 "lastUpdatedDateTime": c.get("lastUpdatedDateTime"),
-                "members": [
-                    mb.get("displayName")
-                    for mb in c.get("members", [])
-                ],
+                **(
+                    {"members": [mb.get("displayName") for mb in c.get("members", [])]}
+                    if include_members else {}
+                ),
             }
             for c in chats
         ],
