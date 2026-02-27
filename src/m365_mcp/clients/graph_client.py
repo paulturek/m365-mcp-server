@@ -9,14 +9,6 @@ Provides an async HTTP client for Microsoft Graph API with:
 Usage:
     >>> async with GraphClient("eyJ0...") as client:
     ...     profile = await client.get("/me")
-
-Implementation note — URL construction:
-    httpx re-encodes path segments when merging a base_url with a relative
-    path, which causes Graph entity IDs containing = (base64 padding) to be
-    percent-encoded to %3D, resulting in ErrorInvalidIdMalformed from Graph.
-
-    To avoid this, we construct the full URL string manually before passing
-    it to httpx, bypassing httpx's URL normalization entirely.
 """
 
 import logging
@@ -80,26 +72,11 @@ class GraphClient:
         self._token = access_token
         self._client: Optional[httpx.AsyncClient] = None
 
-    def _url(self, endpoint: str) -> str:
-        """Build a full Graph API URL without httpx base_url merging.
-
-        httpx re-encodes path segments during base_url + relative path
-        merging, which corrupts Graph entity IDs that contain = characters
-        (base64 padding). By constructing the full URL as a plain string
-        we bypass httpx's URL normalization entirely.
-        """
-        if endpoint.startswith("https://"):
-            # Already a full URL (e.g. @odata.nextLink values)
-            return endpoint
-        return f"{self.BASE_URL}{endpoint}"
-
     async def _ensure_client(self) -> httpx.AsyncClient:
-        """Get or create the HTTP client with auth headers.
-
-        Note: no base_url is set — full URLs are constructed via _url().
-        """
+        """Get or create the HTTP client with auth headers."""
         if self._client is None:
             self._client = httpx.AsyncClient(
+                base_url=self.BASE_URL,
                 headers={
                     "Authorization": f"Bearer {self._token}",
                     "Content-Type": "application/json",
@@ -118,7 +95,7 @@ class GraphClient:
         """Make GET request to Graph API.
 
         Args:
-            endpoint: API endpoint (e.g., '/me/messages') or full URL
+            endpoint: API endpoint (e.g., '/me/messages')
             params: Query parameters
             headers: Additional headers
 
@@ -126,7 +103,7 @@ class GraphClient:
             JSON response as dict
         """
         client = await self._ensure_client()
-        response = await client.get(self._url(endpoint), params=params, headers=headers)
+        response = await client.get(endpoint, params=params, headers=headers)
         return self._handle_response(response)
 
     async def post(
@@ -139,7 +116,7 @@ class GraphClient:
         """Make POST request to Graph API.
 
         Args:
-            endpoint: API endpoint or full URL
+            endpoint: API endpoint
             json: JSON body (for most requests)
             data: Raw bytes (for file uploads)
             headers: Additional headers
@@ -149,7 +126,7 @@ class GraphClient:
         """
         client = await self._ensure_client()
         response = await client.post(
-            self._url(endpoint),
+            endpoint,
             json=json,
             content=data,
             headers=headers,
@@ -160,10 +137,17 @@ class GraphClient:
         self,
         endpoint: str,
         json: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
-        """Make PATCH request to Graph API."""
+        """Make PATCH request to Graph API.
+
+        Args:
+            endpoint: API endpoint
+            json: JSON body
+            headers: Additional headers (e.g. Prefer for immutable IDs)
+        """
         client = await self._ensure_client()
-        response = await client.patch(self._url(endpoint), json=json)
+        response = await client.patch(endpoint, json=json, headers=headers)
         return self._handle_response(response)
 
     async def put(
@@ -176,17 +160,26 @@ class GraphClient:
         """Make PUT request to Graph API."""
         client = await self._ensure_client()
         response = await client.put(
-            self._url(endpoint),
+            endpoint,
             content=data,
             json=json,
             headers=headers,
         )
         return self._handle_response(response)
 
-    async def delete(self, endpoint: str) -> None:
-        """Make DELETE request to Graph API."""
+    async def delete(
+        self,
+        endpoint: str,
+        headers: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Make DELETE request to Graph API.
+
+        Args:
+            endpoint: API endpoint
+            headers: Additional headers (e.g. Prefer for immutable IDs)
+        """
         client = await self._ensure_client()
-        response = await client.delete(self._url(endpoint))
+        response = await client.delete(endpoint, headers=headers)
         if response.status_code not in (200, 204):
             self._handle_response(response)
 
@@ -201,7 +194,7 @@ class GraphClient:
         Yields individual items from the 'value' array across all pages.
 
         Args:
-            endpoint: API endpoint or full URL
+            endpoint: API endpoint
             params: Initial query parameters
             max_pages: Maximum pages to fetch (default 10)
 
@@ -225,13 +218,13 @@ class GraphClient:
         """Download file content as bytes.
 
         Args:
-            endpoint: File content endpoint or full URL
+            endpoint: File content endpoint
 
         Returns:
             File content as bytes
         """
         client = await self._ensure_client()
-        response = await client.get(self._url(endpoint))
+        response = await client.get(endpoint)
         if response.status_code != 200:
             self._handle_response(response)
         return response.content
