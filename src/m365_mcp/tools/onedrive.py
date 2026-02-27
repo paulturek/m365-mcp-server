@@ -25,6 +25,11 @@ def _encode_path(path: str) -> str:
     return quote(path, safe="/")
 
 
+def _encode_id(entity_id: str) -> str:
+    """URL-encode a Graph entity ID for safe use in URL path segments."""
+    return quote(entity_id, safe='')
+
+
 # ---- Tool definitions ---------------------------------------------------
 
 TOOLS = [
@@ -257,7 +262,7 @@ TOOLS = [
 def _resolve_item_endpoint(params: dict) -> str | None:
     """Return the Graph endpoint for a drive item from item_id or item_path."""
     if params.get("item_id"):
-        return f"/me/drive/items/{params['item_id']}"
+        return f"/me/drive/items/{_encode_id(params['item_id'])}"
     if params.get("item_path"):
         encoded = _encode_path(params["item_path"].strip("/"))
         return f"/me/drive/root:/{encoded}"
@@ -363,7 +368,7 @@ async def _share_item(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     if params.get("item_id"):
-        endpoint = f"/me/drive/items/{params['item_id']}/createLink"
+        endpoint = f"/me/drive/items/{_encode_id(params['item_id'])}/createLink"
     elif params.get("item_path"):
         encoded = _encode_path(params["item_path"].strip("/"))
         endpoint = f"/me/drive/root:/{encoded}:/createLink"
@@ -431,7 +436,7 @@ async def _copy_item(params: dict) -> dict:
     client = GraphClient(token)
 
     if params.get("item_id"):
-        endpoint = f"/me/drive/items/{params['item_id']}/copy"
+        endpoint = f"/me/drive/items/{_encode_id(params['item_id'])}/copy"
     elif params.get("item_path"):
         encoded = _encode_path(params["item_path"].strip("/"))
         endpoint = f"/me/drive/root:/{encoded}:/copy"
