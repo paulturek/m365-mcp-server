@@ -26,8 +26,14 @@ def _encode_path(path: str) -> str:
 
 
 def _encode_id(entity_id: str) -> str:
-    """URL-encode a Graph entity ID for safe use in URL path segments."""
-    return quote(entity_id, safe='')
+    """URL-encode a Graph entity ID for safe use in URL path segments.
+
+    Only encodes / which is the only character that would break path
+    segment parsing. All other base64 chars (=, +, -, _) are left as-is.
+    httpx URL normalization is bypassed in GraphClient._url() so these
+    characters reach the wire unmodified.
+    """
+    return quote(entity_id, safe=":@!$&'()*+,;=")
 
 
 # ---- Tool definitions ---------------------------------------------------
@@ -468,7 +474,6 @@ async def _search(params: dict) -> dict:
     """GET /me/drive/root/search(q='...') — search OneDrive."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    # Pass query via params= dict so httpx handles encoding of special chars
     top = params.get("top", 25)
     query = params["query"]
     data = await client.get(
