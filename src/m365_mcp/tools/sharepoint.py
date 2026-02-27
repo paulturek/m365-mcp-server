@@ -4,11 +4,18 @@ Covers: list sites, get site by URL, list library items, download, upload, searc
         create/update/delete list items.
 """
 import logging
+from urllib.parse import quote
 
 from ..auth.oauth_web import get_access_token
 from ..clients.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_id(entity_id: str) -> str:
+    """URL-encode a Graph entity ID for safe use in URL path segments."""
+    return quote(entity_id, safe='')
+
 
 _USER_ID_PROP = {
     "user_id": {
@@ -230,8 +237,8 @@ async def _get_site(params: dict) -> dict:
 async def _list_items(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    drive_id = params.get("drive_id")
+    site_id = _encode_id(params["site_id"])
+    drive_id = _encode_id(params["drive_id"]) if params.get("drive_id") else None
     path = params.get("path", "/").strip("/")
     if drive_id:
         base = f"/sites/{site_id}/drives/{drive_id}"
@@ -263,9 +270,9 @@ async def _list_items(params: dict) -> dict:
 async def _download_file(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    item_id = params["item_id"]
-    drive_id = params.get("drive_id")
+    site_id = _encode_id(params["site_id"])
+    item_id = _encode_id(params["item_id"])
+    drive_id = _encode_id(params["drive_id"]) if params.get("drive_id") else None
     base = f"/sites/{site_id}/drives/{drive_id}" if drive_id else f"/sites/{site_id}/drive"
     meta = await client.get(f"{base}/items/{item_id}")
     return {
@@ -281,8 +288,8 @@ async def _upload_file(params: dict) -> dict:
 
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    drive_id = params.get("drive_id")
+    site_id = _encode_id(params["site_id"])
+    drive_id = _encode_id(params["drive_id"]) if params.get("drive_id") else None
     path = params["path"].strip("/")
     content_bytes = base64.b64decode(params["content"])
     base = f"/sites/{site_id}/drives/{drive_id}" if drive_id else f"/sites/{site_id}/drive"
@@ -330,7 +337,7 @@ async def _list_lists(params: dict) -> dict:
     """GET /sites/{id}/lists — list all SP lists (custom lists + libraries)."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
+    site_id = _encode_id(params["site_id"])
     data = await client.get(f"/sites/{site_id}/lists")
     lists = data.get("value", [])
     return {
@@ -352,8 +359,8 @@ async def _list_list_items(params: dict) -> dict:
     """GET /sites/{id}/lists/{id}/items — list items in a SP list."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    list_id = params["list_id"]
+    site_id = _encode_id(params["site_id"])
+    list_id = _encode_id(params["list_id"])
     top = params.get("top", 25)
     expand = "&$expand=fields" if params.get("expand_fields", True) else ""
     data = await client.get(
@@ -379,8 +386,8 @@ async def _create_list_item(params: dict) -> dict:
     """POST /sites/{id}/lists/{id}/items — create a new list item."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    list_id = params["list_id"]
+    site_id = _encode_id(params["site_id"])
+    list_id = _encode_id(params["list_id"])
     body = {"fields": params["fields"]}
     result = await client.post(
         f"/sites/{site_id}/lists/{list_id}/items", json=body
@@ -396,15 +403,15 @@ async def _update_list_item(params: dict) -> dict:
     """PATCH /sites/{id}/lists/{id}/items/{id}/fields — update list item fields."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    list_id = params["list_id"]
-    item_id = params["item_id"]
+    site_id = _encode_id(params["site_id"])
+    list_id = _encode_id(params["list_id"])
+    item_id = _encode_id(params["item_id"])
     result = await client.patch(
         f"/sites/{site_id}/lists/{list_id}/items/{item_id}/fields",
         json=params["fields"],
     )
     return {
-        "id": item_id,
+        "id": params["item_id"],
         "fields": result,
     }
 
@@ -413,13 +420,13 @@ async def _delete_list_item(params: dict) -> dict:
     """DELETE /sites/{id}/lists/{id}/items/{id} — delete a list item."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    site_id = params["site_id"]
-    list_id = params["list_id"]
-    item_id = params["item_id"]
+    site_id = _encode_id(params["site_id"])
+    list_id = _encode_id(params["list_id"])
+    item_id = _encode_id(params["item_id"])
     await client.delete(
         f"/sites/{site_id}/lists/{list_id}/items/{item_id}"
     )
-    return {"deleted": True, "item_id": item_id}
+    return {"deleted": True, "item_id": params["item_id"]}
 
 
 HANDLERS = {
