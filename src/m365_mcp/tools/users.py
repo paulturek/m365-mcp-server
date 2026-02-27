@@ -6,7 +6,7 @@ Covers: get current user profile, look up user, list directory, search,
 import logging
 
 from ..auth.oauth_web import get_access_token
-from ..clients.graph_client import GraphClient
+from ..clients.graph_client import GraphClient, GraphAPIError, AuthenticationRequiredError
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ TOOLS = [
     },
     {
         "name": "users_search",
-        "description": "Search for users by name or email.",
+        "description": "Search for users by name or email (uses startsWith on displayName and mail).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -126,7 +126,7 @@ _USER_FIELDS = "id,displayName,mail,userPrincipalName,jobTitle,department,office
 async def _get_me(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    data = await client.get(f"/me?$select={_USER_FIELDS}")
+    data = await client.get("/me", params={"$select": _USER_FIELDS})
     return _format_user(data)
 
 
@@ -134,29 +134,33 @@ async def _get_user(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     target = params["target"]
-    data = await client.get(f"/users/{target}?$select={_USER_FIELDS}")
+    data = await client.get(f"/users/{target}", params={"$select": _USER_FIELDS})
     return _format_user(data)
 
 
 async def _list_users(params: dict) -> dict:
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
-    top = params.get("top", 25)
-    qp = f"?$top={top}&$select={_USER_FIELDS}"
+    qparams: dict = {"$top": params.get("top", 25), "$select": _USER_FIELDS}
     if params.get("filter"):
-        qp += f"&$filter={params['filter']}"
-    data = await client.get(f"/users{qp}")
+        qparams["$filter"] = params["filter"]
+    data = await client.get("/users", params=qparams)
     users = data.get("value", [])
     return {"count": len(users), "users": [_format_user(u) for u in users]}
 
 
 async def _search_users(params: dict) -> dict:
+    """Search users via $filter with startsWith — passed as params dict for proper URL encoding."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     q = params["query"]
     top = params.get("top", 10)
+    # Pass filter via params= so httpx handles URL encoding of spaces, quotes, etc.
     filter_expr = f"startswith(displayName,'{q}') or startswith(mail,'{q}')"
-    data = await client.get(f"/users?$filter={filter_expr}&$top={top}&$select={_USER_FIELDS}")
+    data = await client.get(
+        "/users",
+        params={"$filter": filter_expr, "$top": top, "$select": _USER_FIELDS},
+    )
     users = data.get("value", [])
     return {"count": len(users), "users": [_format_user(u) for u in users]}
 
@@ -167,7 +171,7 @@ async def _get_manager(params: dict) -> dict:
     client = GraphClient(token)
     target = params.get("target")
     endpoint = f"/users/{target}/manager" if target else "/me/manager"
-    data = await client.get(f"{endpoint}?$select={_USER_FIELDS}")
+    data = await client.get(endpoint, params={"$select": _USER_FIELDS})
     return _format_user(data)
 
 
@@ -177,7 +181,7 @@ async def _get_direct_reports(params: dict) -> dict:
     client = GraphClient(token)
     target = params.get("target")
     endpoint = f"/users/{target}/directReports" if target else "/me/directReports"
-    data = await client.get(f"{endpoint}?$select={_USER_FIELDS}")
+    data = await client.get(endpoint, params={"$select": _USER_FIELDS})
     reports = data.get("value", [])
     return {
         "count": len(reports),
@@ -186,35 +190,34 @@ async def _get_direct_reports(params: dict) -> dict:
 
 
 async def _get_photo(params: dict) -> dict:
-    """GET user photo metadata. Returns photo info and content URL."""
+    """GET user photo metadata. Returns photo info and content endpoint."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     target = params.get("target")
     size = params.get("size")
 
-    if target:
-        base = f"/users/{target}"
-    else:
-        base = "/me"
-
-    if size:
-        photo_endpoint = f"{base}/photos/{size}"
-    else:
-        photo_endpoint = f"{base}/photo"
+    base = f"/users/{target}" if target else "/me"
+    photo_endpoint = f"{base}/photos/{size}" if size else f"{base}/photo"
 
     try:
         meta = await client.get(photo_endpoint)
-        # Build the content download URL
-        content_url = f"{photo_endpoint}/$value"
         return {
             "width": meta.get("width"),
             "height": meta.get("height"),
             "id": meta.get("id"),
             "contentType": meta.get("@odata.mediaContentType"),
-            "downloadEndpoint": content_url,
+            "downloadEndpoint": f"{photo_endpoint}/$value",
         }
+    except AuthenticationRequiredError:
+        raise
+    except GraphAPIError as e:
+        if e.status_code == 404:
+            return {"error": "No photo set for this user"}
+        if e.status_code == 403:
+            return {"error": f"Permission denied — requires User.Read.All: {e.message}"}
+        return {"error": f"Graph API error [{e.status_code}]: {e.message}"}
     except Exception as e:
-        return {"error": f"Photo not available: {e}"}
+        return {"error": f"Unexpected error retrieving photo: {e}"}
 
 
 def _format_user(u: dict) -> dict:
