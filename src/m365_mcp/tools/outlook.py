@@ -33,8 +33,8 @@ TOOLS = [
                         "OData $filter expression. Supported: eq, ne, startsWith(), "
                         "isRead eq true/false, hasAttachments eq true, "
                         "from/emailAddress/address eq '...'. "
-                        "NOTE: contains() is NOT supported — use the 'search' parameter "
-                        "for keyword/subject matching instead."
+                        "NOTE: contains() is NOT supported. "
+                        "Cannot be combined with 'search' — use one or the other."
                     ),
                 },
                 "search": {
@@ -42,7 +42,8 @@ TOOLS = [
                     "description": (
                         "Keyword search across subject, body, and sender. "
                         "Use this instead of $filter for keyword matching. "
-                        "Cannot be combined with $orderby (results use relevance ranking)."
+                        "Cannot be combined with 'filter' or $orderby — "
+                        "results use relevance ranking."
                     ),
                 },
             },
@@ -315,19 +316,18 @@ async def _list_mail(params: dict) -> dict:
     client = GraphClient(token)
     folder = params.get("folder", "inbox")
     top = params.get("top", 10)
-
-    # Graph API: $orderby is incompatible with $search.
-    # When searching, Graph returns results ranked by relevance.
     has_search = bool(params.get("search"))
 
+    # Graph API mutual exclusions:
+    # - $search cannot be combined with $orderby (400 SearchWithOrderBy)
+    # - $search cannot be combined with $filter (400)
+    # When searching, Graph returns results by relevance ranking.
     if has_search:
-        qp = f"?$top={top}"
-        qp += f"&$search=\"{params['search']}\""
+        qp = f"?$top={top}&$search=\"{params['search']}\""
     else:
         qp = f"?$top={top}&$orderby=receivedDateTime desc"
-
-    if params.get("filter"):
-        qp += f"&$filter={params['filter']}"
+        if params.get("filter"):
+            qp += f"&$filter={params['filter']}"
 
     data = await client.get(f"/me/mailFolders/{folder}/messages{qp}")
     messages = data.get("value", [])
