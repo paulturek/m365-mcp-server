@@ -64,26 +64,26 @@ async def start_device_login(user_id: str) -> dict[str, Any]:
     Returns a dict with ``user_code``, ``verification_uri``, and
     ``expires_in`` for display to the user.
     """
-    # ── DIAGNOSTIC ────────────────────────────────────────────────────────────
-    logger.info("DIAG device_code.py GRAPH_SCOPES (%d): %s",
-                len(GRAPH_SCOPES), " ".join(GRAPH_SCOPES))
-    logger.info("DIAG CLIENT_ID=%s  TENANT_ID=%s  AUTHORITY=%s",
-                CLIENT_ID, TENANT_ID, AUTHORITY)
+    # ── DIAGNOSTIC (WARNING level to ensure visibility) ───────────────────────
+    logger.warning("DIAG device_code.py GRAPH_SCOPES (%d): %s",
+                   len(GRAPH_SCOPES), " ".join(GRAPH_SCOPES))
+    logger.warning("DIAG CLIENT_ID=%s  TENANT_ID=%s  AUTHORITY=%s",
+                   CLIENT_ID, TENANT_ID, AUTHORITY)
     # ─────────────────────────────────────────────────────────────────────────
 
     app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY)
 
-    logger.info("DIAG calling initiate_device_flow with scopes: %s", GRAPH_SCOPES)
+    logger.warning("DIAG calling initiate_device_flow with scopes: %s", GRAPH_SCOPES)
     flow = app.initiate_device_flow(scopes=GRAPH_SCOPES)
 
     if "error" in flow:
-        logger.error("DIAG device_flow error response: %s", flow)
+        logger.warning("DIAG device_flow error response: %s", flow)
         raise RuntimeError(f"Device flow error: {flow.get('error_description', flow)}")
 
     _pending_flows[user_id] = {"flow": flow, "app": app}
 
-    logger.info("DIAG device flow initiated OK for %s — user_code=%s",
-                user_id, flow.get("user_code"))
+    logger.warning("DIAG device flow initiated OK for %s — user_code=%s",
+                   user_id, flow.get("user_code"))
 
     return {
         "user_code":        flow["user_code"],
@@ -106,7 +106,7 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
     app: msal.PublicClientApplication = entry["app"]
     flow: dict = entry["flow"]
 
-    logger.info("DIAG check_device_login polling for %s", user_id)
+    logger.warning("DIAG check_device_login polling for %s", user_id)
 
     result = app.acquire_token_by_device_flow(flow, timeout=5)
 
@@ -114,7 +114,7 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
         err = result.get("error", "")
         desc = result.get("error_description", "")
 
-        logger.error("DIAG acquire_token_by_device_flow error: %s — %s", err, desc)
+        logger.warning("DIAG acquire_token_by_device_flow error: %s — %s", err, desc)
 
         if err == "authorization_pending":
             return {"status": "pending"}
@@ -123,8 +123,8 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
         return {"status": "error", "message": f"{err}: {desc}"}
 
     # ── Success ───────────────────────────────────────────────────────────────
-    logger.info("DIAG token acquired for %s — scopes granted: %s",
-                user_id, result.get("scope", ""))
+    logger.warning("DIAG token acquired for %s — scopes granted: %s",
+                   user_id, result.get("scope", ""))
 
     token_data = {
         "access_token":  result["access_token"],
@@ -137,7 +137,7 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
     await _pg_store_token(user_id, token_data)
     del _pending_flows[user_id]
 
-    logger.info("DIAG token stored for %s", user_id)
+    logger.warning("DIAG token stored for %s", user_id)
 
     return {
         "status":  "success",
