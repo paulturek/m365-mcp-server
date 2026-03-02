@@ -40,6 +40,7 @@ REDIRECT_URI: str = os.environ.get("OAUTH_REDIRECT_URI", "")
 
 # Domain normalization: ensures all user_ids are stored/looked up
 # with the canonical email domain (e.g. "bolthousefresh.com").
+# Any email with a different domain is rewritten before token ops.
 USER_EMAIL_DOMAIN: str = os.environ.get("USER_EMAIL_DOMAIN", "")
 
 SCOPES = [
@@ -94,7 +95,17 @@ def _get_msal_app() -> msal.ConfidentialClientApplication:
 # Domain normalization
 # ---------------------------------------------------------------------------
 def _normalize_user_id(user_id: str) -> str:
-    """Rewrite user_id to use the canonical email domain."""
+    """Rewrite user_id to use the canonical email domain.
+
+    If USER_EMAIL_DOMAIN is set (e.g. "bolthousefresh.com") and the
+    user_id contains an '@', replace whatever domain is after '@'
+    with the canonical one.
+
+    Examples (USER_EMAIL_DOMAIN=bolthousefresh.com):
+      paul.turek@bolthouse.com     → paul.turek@bolthousefresh.com
+      paul.turek@bolthousefresh.com → paul.turek@bolthousefresh.com  (no-op)
+      paul.turek@anything.com      → paul.turek@bolthousefresh.com
+    """
     if not USER_EMAIL_DOMAIN or "@" not in user_id:
         return user_id
 
@@ -102,7 +113,9 @@ def _normalize_user_id(user_id: str) -> str:
     canonical = f"{local_part}@{USER_EMAIL_DOMAIN}"
 
     if current_domain.lower() != USER_EMAIL_DOMAIN.lower():
-        logger.info("Domain normalized: %s → %s", user_id, canonical)
+        logger.info(
+            "Domain normalized: %s → %s", user_id, canonical
+        )
     return canonical
 
 
@@ -111,10 +124,15 @@ def _normalize_user_id(user_id: str) -> str:
 # ---------------------------------------------------------------------------
 async def _auto_device_code(user_id: str) -> str:
     """Start a device-code flow and return a user-friendly error message
-    containing the sign-in code."""
+    containing the sign-in code. If a flow is already pending, return
+    the existing code. Falls back to /auth/login URL if device-code
+    cannot be initiated (e.g. public client flows not enabled).
+    """
     try:
+        # Lazy import to avoid circular dependency
         from .device_code import start_device_flow, _pending_flows
 
+        # If there's already a pending flow, return the existing code
         if user_id in _pending_flows:
             flow = _pending_flows[user_id]
             code = flow.get("user_code", "")
@@ -124,9 +142,11 @@ async def _auto_device_code(user_id: str) -> str:
                 f"then retry your request."
             )
 
+        # Start a new device-code flow
         result = await start_device_flow(user_id)
 
         if result.get("status") == "error":
+            # Device code failed (public client flows not enabled, etc.)
             logger.warning(
                 "Device-code initiation failed for %s: %s",
                 user_id,
@@ -159,13 +179,20 @@ async def _auto_device_code(user_id: str) -> str:
 # Public: get a valid access token (auto-refresh, auto-device-code)
 # ---------------------------------------------------------------------------
 async def get_access_token(user_id: str) -> str:
-    """Return a valid MS Graph access token for *user_id*."""
+    """Return a valid MS Graph access token for *user_id*.
+
+    Normalises the user_id domain, automatically refreshes expired
+    tokens. If no token exists or refresh fails, auto-starts a
+    device-code flow and raises HTTPException(401) with the sign-in
+    code in the detail message.
+    """
     if not user_id:
         raise HTTPException(
             status_code=400,
             detail="user_id is required for Microsoft 365 operations",
         )
 
+    # Normalize domain before any token lookup/storage
     user_id = _normalize_user_id(user_id)
 
     store = _get_store()
@@ -175,9 +202,11 @@ async def get_access_token(user_id: str) -> str:
         detail = await _auto_device_code(user_id)
         raise HTTPException(status_code=401, detail=detail)
 
+    # Still valid (5-min safety margin)?
     if cache.get("expires_at", 0) > time.time() + 300:
         return cache["access_token"]
 
+    # --- Refresh ---
     refresh_token = cache.get("refresh_token")
     if not refresh_token:
         detail = await _auto_device_code(user_id)
@@ -210,7 +239,12 @@ async def get_access_token(user_id: str) -> str:
 # Public: store token (used by device_code.py after successful auth)
 # ---------------------------------------------------------------------------
 async def store_token(user_id: str, token_result: dict) -> None:
-    """Persist a token from any auth flow (device-code, web, etc.)."""
+    """Persist a token from any auth flow (device-code, web, etc.).
+
+    Normalises the user_id domain and the MSAL result dict into the
+    format expected by get_access_token, then saves to the token store.
+    """
+    # Normalize domain before storage
     user_id = _normalize_user_id(user_id)
 
     id_claims = token_result.get("id_token_claims", {})
@@ -250,6 +284,7 @@ async def login(
             detail="OAuth not configured. Set AZURE_CLIENT_ID and OAUTH_REDIRECT_URI.",
         )
 
+    # Normalize domain for the login flow too
     user_id = _normalize_user_id(user_id)
 
     app = _get_msal_app()
@@ -279,15 +314,18 @@ async def callback(request: Request):
             f"<h2>Authorisation Failed</h2><p>{desc}</p>", status_code=400
         )
 
+    # CSRF validation + recover user_id
     state_data = _auth_states.pop(state, None)
     if not state_data:
         raise HTTPException(status_code=400, detail="Invalid or expired state parameter")
     user_id = state_data["user_id"]
 
+    # Housekeep stale states (>10 min)
     cutoff = time.time() - 600
     for k in [k for k, v in _auth_states.items() if v["ts"] < cutoff]:
         del _auth_states[k]
 
+    # Exchange authorisation code for tokens
     app = _get_msal_app()
     result = app.acquire_token_by_authorization_code(
         code=code, scopes=SCOPES, redirect_uri=REDIRECT_URI
@@ -299,6 +337,7 @@ async def callback(request: Request):
             f"<h2>Token Exchange Failed</h2><p>{desc}</p>", status_code=400
         )
 
+    # Use the shared store_token function (handles normalization)
     await store_token(user_id, result)
 
     id_claims = result.get("id_token_claims", {})
@@ -326,6 +365,7 @@ async def auth_status(user_id: Optional[str] = Query(None)):
     store = _get_store()
 
     if user_id:
+        # Normalize before lookup
         user_id = _normalize_user_id(user_id)
         cache = await store.get(user_id)
         if not cache:
@@ -347,6 +387,7 @@ async def auth_status(user_id: Optional[str] = Query(None)):
 @router.delete("/revoke")
 async def revoke(user_id: str = Query(..., description="User to revoke")):
     """Remove all stored tokens for a user."""
+    # Normalize before revoke
     user_id = _normalize_user_id(user_id)
     store = _get_store()
     if await store.delete(user_id):
