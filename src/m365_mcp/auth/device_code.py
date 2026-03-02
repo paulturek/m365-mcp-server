@@ -70,6 +70,10 @@ async def start_device_login(user_id: str) -> dict[str, Any]:
     }
 
 
+# Alias so oauth_web.py can import either name
+start_device_flow = start_device_login
+
+
 async def check_device_login(user_id: str) -> dict[str, Any]:
     """Poll Azure AD for token. Returns status: pending | success | error."""
     if user_id not in _pending_flows:
