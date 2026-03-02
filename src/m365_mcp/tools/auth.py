@@ -1,30 +1,45 @@
-"""MCP tools for authentication — device code flow + status checks.
+"""
+Authentication MCP tools.
+
+Exposes device-code flow authentication as MCP tools so any MCP client
+can initiate and complete user authentication without direct HTTP access
+to the /auth/* endpoints.
 
 Tools:
-  auth_status              — Check if a user has an active M365 token
-  auth_start_device_login  — Start device-code flow (returns code + URL)
-  auth_check_device_login  — Check if device-code flow has completed
+  - auth_status              — check whether a user has a valid cached token
+  - auth_start_device_login  — begin device code flow, return URL + code
+  - auth_check_device_login  — poll for completion and persist the token
 """
 
-from ..auth.device_code import start_device_flow, get_flow_status
+from __future__ import annotations
+
+import logging
+
+from m365_mcp.auth.device_code import (
+    start_device_code_flow,
+    poll_device_code_flow,
+)
+from m365_mcp.auth.token_store_pg import get_token_store
+
+logger = logging.getLogger("m365_mcp.tools.auth")
 
 # ---------------------------------------------------------------------------
-# Tool definitions (MCP JSON schema)
+# Tool definitions
 # ---------------------------------------------------------------------------
-TOOL_DEFINITIONS = [
+
+TOOLS = [
     {
         "name": "auth_status",
         "description": (
-            "Check whether a user has an active Microsoft 365 authentication "
-            "token. Call this before making M365 API requests to verify the "
-            "user is connected. Returns authenticated: true/false."
+            "Check whether a user has a valid cached Microsoft 365 token. "
+            "Returns authenticated status and token expiry information."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "user_id": {
                     "type": "string",
-                    "description": "Microsoft 365 email address (e.g. user@company.com)",
+                    "description": "User email address (e.g. paul.turek@bolthousefresh.com)",
                 }
             },
             "required": ["user_id"],
@@ -33,19 +48,16 @@ TOOL_DEFINITIONS = [
     {
         "name": "auth_start_device_login",
         "description": (
-            "Start a device-code login flow for Microsoft 365. Returns a "
-            "one-time code and a URL (https://microsoft.com/devicelogin) for "
-            "the user to enter in their browser. The server polls automatically "
-            "in the background — use auth_check_device_login to check whether "
-            "the user has completed sign-in. If the user is already "
-            "authenticated, returns immediately without starting a new flow."
+            "Start the Microsoft device code authentication flow for a user. "
+            "Returns a URL and a short code — the user must visit the URL and enter the code "
+            "to grant access. After the user completes this, call auth_check_device_login."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "user_id": {
                     "type": "string",
-                    "description": "Microsoft 365 email address to authenticate",
+                    "description": "User email address to authenticate",
                 }
             },
             "required": ["user_id"],
@@ -54,17 +66,16 @@ TOOL_DEFINITIONS = [
     {
         "name": "auth_check_device_login",
         "description": (
-            "Check whether a previously started device-code login flow has "
-            "completed. Returns status: completed | pending | failed | "
-            "cancelled | no_flow. Once completed, the user's M365 tools "
-            "are ready to use."
+            "Poll for completion of a device code login that was started with "
+            "auth_start_device_login. Call this after the user has visited the URL "
+            "and entered the code. Returns success or pending status."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "user_id": {
                     "type": "string",
-                    "description": "Microsoft 365 email address to check",
+                    "description": "User email address (must match the auth_start_device_login call)",
                 }
             },
             "required": ["user_id"],
@@ -72,110 +83,66 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-
 # ---------------------------------------------------------------------------
-# Tool handlers
+# Handlers
 # ---------------------------------------------------------------------------
-async def handle_auth_status(args: dict) -> dict:
-    """Check if user has a valid M365 token."""
-    user_id = args.get("user_id", "").strip()
-    if not user_id:
-        return {"error": "user_id is required"}
 
+async def _handle_auth_status(args: dict) -> dict:
+    user_id: str = args["user_id"]
     try:
-        from ..auth.oauth_web import get_access_token
-
-        token = await get_access_token(user_id)
-        if token:
+        store = await get_token_store()
+        token_data = await store.get_token(user_id)
+        if token_data:
             return {
                 "authenticated": True,
                 "user_id": user_id,
-                "message": "User is authenticated and ready to use M365 tools.",
+                "message": "User has a valid cached token.",
             }
-    except Exception:
-        pass
+        return {
+            "authenticated": False,
+            "user_id": user_id,
+            "message": "No token found. Use auth_start_device_login to authenticate.",
+        }
+    except Exception as exc:
+        logger.exception("auth_status failed for %s", user_id)
+        return {
+            "authenticated": False,
+            "user_id": user_id,
+            "error": str(exc),
+        }
 
-    return {
-        "authenticated": False,
-        "user_id": user_id,
-        "message": (
-            "User is not authenticated. "
-            "Use auth_start_device_login to begin in-chat sign-in."
-        ),
-    }
 
-
-async def handle_auth_start_device_login(args: dict) -> dict:
-    """Start device-code flow (or report already authenticated)."""
-    user_id = args.get("user_id", "").strip()
-    if not user_id:
-        return {"error": "user_id is required"}
-
-    # Check if already authenticated — skip flow if so
+async def _handle_start_device_login(args: dict) -> dict:
+    user_id: str = args["user_id"]
     try:
-        from ..auth.oauth_web import get_access_token
+        result = await start_device_code_flow(user_id)
+        return {
+            "user_id": user_id,
+            "verification_uri": result.get("verification_uri"),
+            "user_code": result.get("user_code"),
+            "message": result.get("message", (
+                f"Visit {result.get('verification_uri')} and enter code: "
+                f"{result.get('user_code')}"
+            )),
+            "expires_in": result.get("expires_in"),
+        }
+    except Exception as exc:
+        logger.exception("auth_start_device_login failed for %s", user_id)
+        return {"error": str(exc), "user_id": user_id}
 
-        token = await get_access_token(user_id)
-        if token:
-            return {
-                "status": "already_authenticated",
-                "user_id": user_id,
-                "message": "User is already authenticated. No login needed.",
-            }
-    except Exception:
-        pass  # Not authenticated — proceed with device-code flow
 
+async def _handle_check_device_login(args: dict) -> dict:
+    user_id: str = args["user_id"]
     try:
-        result = await start_device_flow(user_id)
+        result = await poll_device_code_flow(user_id)
         return result
     except Exception as exc:
-        return {"status": "error", "error": str(exc)}
+        logger.exception("auth_check_device_login failed for %s", user_id)
+        return {"error": str(exc), "user_id": user_id}
 
 
-async def handle_auth_check_device_login(args: dict) -> dict:
-    """Poll for device-code flow completion."""
-    user_id = args.get("user_id", "").strip()
-    if not user_id:
-        return {"error": "user_id is required"}
-
-    status = get_flow_status(user_id)
-
-    # Enrich the response based on status
-    if status["status"] == "completed":
-        status["user_id"] = user_id
-        status["message"] = (
-            f"Authentication complete for {user_id}! "
-            "You can now use all M365 tools (mail, calendar, files, etc.)."
-        )
-    elif status["status"] == "no_flow":
-        # No active flow — check if user is already authenticated
-        try:
-            from ..auth.oauth_web import get_access_token
-
-            token = await get_access_token(user_id)
-            if token:
-                return {
-                    "status": "already_authenticated",
-                    "user_id": user_id,
-                    "message": "User is already authenticated.",
-                }
-        except Exception:
-            pass
-        status["message"] = (
-            "No active login flow for this user. "
-            "Use auth_start_device_login to begin."
-        )
-    elif status["status"] == "failed":
-        status["user_id"] = user_id
-
-    return status
-
-
-# ---------------------------------------------------------------------------
-# Handler map (consumed by __main__.py for tool registration)
-# ---------------------------------------------------------------------------
-TOOL_HANDLERS = {
-    "auth_status": handle_auth_status,
-    "auth_start_device_login": handle_auth_start_device_login,
-    "auth_check_device_login": handle_auth_check_device_login,
+HANDLERS: dict[str, object] = {
+    "auth_status": _handle_auth_status,
+    "auth_start_device_login": _handle_start_device_login,
+    "auth_check_device_login": _handle_check_device_login,
 }
