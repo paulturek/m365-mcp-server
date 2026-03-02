@@ -10,13 +10,13 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files first for layer caching
-COPY pyproject.toml ./
+# Copy dependency files — README.md required by hatchling at build time
+COPY pyproject.toml README.md ./
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e ".[prod]" 2>/dev/null || pip install --no-cache-dir -e .
 
-# Copy source code (after deps to maximise cache hits on clean builds)
+# Copy source code
 COPY src/ ./src/
 
 # Expose port
