@@ -10,7 +10,6 @@ by __main__.py's MCP JSON-RPC dispatcher.
 from typing import Callable, Awaitable
 
 from . import (
-    auth,
     onedrive,
     excel,
     outlook,
@@ -23,7 +22,6 @@ from . import (
 )
 
 _MODULES = [
-    auth,
     onedrive,
     excel,
     outlook,
