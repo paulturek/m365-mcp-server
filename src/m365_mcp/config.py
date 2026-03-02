@@ -86,10 +86,7 @@ class M365Config:
         "offline_access",
     ])
     
-    # Power BI API scopes (separate API endpoint)
-    powerbi_scopes: list[str] = field(default_factory=lambda: [
-        "https://analysis.windows.net/powerbi/api/.default"
-    ])
+
     
     def validate(self) -> None:
         """Validate required configuration values.
