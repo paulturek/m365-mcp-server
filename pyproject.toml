@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "m365-mcp-server"
-version = "2.1.1"
+version = "2.1.2"
 description = "Microsoft 365 MCP Server"
 readme = "README.md"
 requires-python = ">=3.11"
