@@ -4,7 +4,7 @@ All user tokens live in a single Fernet-encrypted JSON file.
 Suitable for single-instance Railway deploys with a persistent volume.
 
 Config env vars:
-  TOKEN_ENCRYPTION_KEY  — Fernet key
+  TOKEN_ENCRYPTION_KEY  — Fernet key (generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
   TOKEN_STORE_PATH      — File path (default /app/data/tokens.enc)
 """
 import json
@@ -33,6 +33,8 @@ class FileTokenStore(TokenStore):
         self._loaded = False
         self._lock = asyncio.Lock()
 
+    # -- internal --------------------------------------------------------
+
     def _load(self) -> dict[str, dict]:
         if self._loaded:
             return self._cache
@@ -53,6 +55,8 @@ class FileTokenStore(TokenStore):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         encrypted = self._fernet.encrypt(json.dumps(self._cache).encode())
         self._path.write_bytes(encrypted)
+
+    # -- public ----------------------------------------------------------
 
     async def get(self, user_id: str) -> Optional[dict]:
         async with self._lock:
