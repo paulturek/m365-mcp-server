@@ -3,6 +3,12 @@
 This module handles all configuration loading from environment variables
 with sensible defaults. Configuration is validated on startup.
 
+Note: This module is NOT currently imported by the running server.
+The canonical OAuth scopes are defined directly in:
+  - auth/oauth_web.py  (SCOPES)
+  - auth/device_code.py (GRAPH_SCOPES)
+This file is retained for reference and future use.
+
 Environment Variables:
     M365_CLIENT_ID: Azure AD Application (client) ID (required)
     M365_TENANT_ID: Azure AD tenant ID (default: 'common')
@@ -25,7 +31,7 @@ load_dotenv()
 @dataclass
 class M365Config:
     """Configuration container for M365 MCP Server.
-    
+
     Attributes:
         client_id: Azure AD Application (client) ID
         tenant_id: Azure AD tenant ID ('common' for multi-tenant)
@@ -33,9 +39,8 @@ class M365Config:
         cache_path: Path to encrypted token cache file
         cache_encryption_key: Optional custom encryption key
         graph_scopes: OAuth scopes for Microsoft Graph API
-        powerbi_scopes: OAuth scopes for Power BI API
     """
-    
+
     # Azure AD App Registration
     client_id: str = field(
         default_factory=lambda: os.getenv("M365_CLIENT_ID", "")
@@ -46,7 +51,7 @@ class M365Config:
     client_secret: Optional[str] = field(
         default_factory=lambda: os.getenv("M365_CLIENT_SECRET")
     )
-    
+
     # Token cache configuration
     cache_path: str = field(
         default_factory=lambda: os.getenv(
@@ -57,40 +62,26 @@ class M365Config:
     cache_encryption_key: Optional[str] = field(
         default_factory=lambda: os.getenv("M365_CACHE_ENCRYPTION_KEY")
     )
-    
+
     # Microsoft Graph API scopes (delegated permissions)
+    # Must match auth/oauth_web.py SCOPES and auth/device_code.py GRAPH_SCOPES
     graph_scopes: list[str] = field(default_factory=lambda: [
-        # User profile
         "User.Read",
-        
-        # Outlook Mail
+        "User.ReadBasic.All",
         "Mail.ReadWrite",
         "Mail.Send",
-        
-        # Calendar
         "Calendars.ReadWrite",
-        
-        # OneDrive & SharePoint files
         "Files.ReadWrite.All",
-        
-        # SharePoint sites and lists
         "Sites.ReadWrite.All",
-        
-        # Teams
         "Team.ReadBasic.All",
         "Channel.ReadBasic.All",
-        "Chat.ReadWrite",
         "ChannelMessage.Send",
-        
-        # Required for refresh tokens
-        "offline_access",
+        "Tasks.ReadWrite",
     ])
-    
 
-    
     def validate(self) -> None:
         """Validate required configuration values.
-        
+
         Raises:
             ValueError: If required configuration is missing.
         """
@@ -99,12 +90,12 @@ class M365Config:
                 "M365_CLIENT_ID environment variable is required. "
                 "Get this from Azure Portal > App registrations."
             )
-    
+
     @property
     def authority(self) -> str:
         """Get the Azure AD authority URL."""
         return f"https://login.microsoftonline.com/{self.tenant_id}"
-    
+
     @property
     def is_confidential_client(self) -> bool:
         """Check if configured for confidential client flow."""
