@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Cache bust — forces full layer rebuild: 2026-03-02T21:50:00Z
-ARG CACHE_BUST=2026-03-02T21:50:00Z
+# Cache bust — forces full layer rebuild: 2026-03-02T21:52:00Z
+ARG CACHE_BUST=2026-03-02T21:52:00Z
 
 WORKDIR /app
 
@@ -10,14 +10,12 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files — README.md required by hatchling at build time
+# Copy everything needed for install
 COPY pyproject.toml README.md ./
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -e ".[prod]" 2>/dev/null || pip install --no-cache-dir -e .
-
-# Copy source code
 COPY src/ ./src/
+
+# Install package (non-editable so module is fully installed into site-packages)
+RUN pip install --no-cache-dir .
 
 # Expose port
 EXPOSE 8080
