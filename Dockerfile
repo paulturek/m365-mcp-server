@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Cache bust — forces full layer rebuild: 2026-03-02T21:52:00Z
-ARG CACHE_BUST=2026-03-02T21:52:00Z
+# Cache bust — forces full layer rebuild: 2026-03-02T22:25:00Z
+ARG CACHE_BUST=2026-03-02T22:25:00Z
 
 WORKDIR /app
 
