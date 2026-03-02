@@ -1,6 +1,6 @@
 # m365-mcp-server
 
-A production-grade **Model Context Protocol (MCP) server** for Microsoft 365, built with FastAPI. Exposes 68 tools covering Outlook, Calendar, OneDrive, SharePoint, Teams, Excel, To Do, Users/Directory, and Office Docs — all via Microsoft Graph API.
+A production-grade **Model Context Protocol (MCP) server** for Microsoft 365, built with FastAPI. Exposes **75 tools** covering Outlook, Calendar, OneDrive, SharePoint, Teams, Excel, To Do, Users/Directory, Office Docs, and **Power BI** — all via Microsoft APIs.
 
 ---
 
@@ -8,11 +8,11 @@ A production-grade **Model Context Protocol (MCP) server** for Microsoft 365, bu
 
 | Property | Value |
 |---|---|
-| Version | 2.0.1 |
+| Version | 2.1.0 |
 | MCP Protocol | `2024-11-05` |
 | Transport | HTTP (JSON-RPC 2.0) at `/mcp` |
 | Auth | MSAL Device Code Flow (per-user tokens, stored in PostgreSQL) |
-| Tools | **68** |
+| Tools | **75** |
 
 ---
 
@@ -40,6 +40,8 @@ MCP_BEARER_TOKEN=<your-secret-bearer-token>
 # Domain normalization (appended to bare usernames)
 USER_EMAIL_DOMAIN=bolthousefresh.com
 ```
+
+> No additional environment variables are required for Power BI. The existing Azure AD app registration is reused with new Power BI Service delegated permissions.
 
 ### 3. Run
 
@@ -75,7 +77,7 @@ The server uses **MSAL Device Code Flow**. On first use per user:
 
 ## Required Azure AD Permissions
 
-All are **Delegated** permissions on Microsoft Graph:
+### Microsoft Graph (Delegated)
 
 | Permission | Scope |
 |---|---|
@@ -94,7 +96,18 @@ All are **Delegated** permissions on Microsoft Graph:
 | `Chat.ReadWrite` | List and read chats |
 | `ChatMessage.Send` | Send chat messages |
 
-After adding permissions, click **"Grant admin consent"** in the Azure portal.
+### Power BI Service (Delegated)
+
+| Permission | Scope |
+|---|---|
+| `Dataset.Read.All` | List datasets and refresh history |
+| `Dataset.ReadWrite.All` | Trigger dataset refreshes |
+| `Report.Read.All` | List reports |
+| `Workspace.Read.All` | List workspaces |
+
+After adding permissions, click **"Grant admin consent"** in the Azure portal. Users must re-authenticate after new permissions are added.
+
+> **Token note:** Power BI uses a separate API audience (`https://analysis.windows.net/powerbi/api/.default`) from Microsoft Graph. MSAL automatically issues and caches separate tokens per audience from a single device code authentication — no extra login steps for users.
 
 ---
 
@@ -246,6 +259,29 @@ Paths with spaces (e.g. `My Documents/Budget 2026.xlsx`) are handled correctly v
 
 ---
 
+### Power BI (7 tools)
+
+Connects to the Power BI REST API (`api.powerbi.com`) using a separate token scope from Microsoft Graph. No additional environment variables required — the existing Azure AD app registration is reused with new Power BI Service delegated permissions.
+
+| Tool | Key Parameters | Notes |
+|---|---|---|
+| `powerbi_list_workspaces` | `user_id` | Lists all Power BI workspaces the user has access to |
+| `powerbi_list_datasets` | `user_id`, `workspace_id` | Lists all datasets/semantic models in a workspace. Use `workspace_id='me'` for My Workspace |
+| `powerbi_get_dataset` | `user_id`, `workspace_id`, `dataset_id` | Get details of a specific dataset including refresh eligibility |
+| `powerbi_refresh_dataset` | `user_id`, `workspace_id`, `dataset_id`, `notify_option` | Trigger an on-demand refresh. Returns immediately (async). Poll history to confirm completion |
+| `powerbi_get_refresh_history` | `user_id`, `workspace_id`, `dataset_id`, `top` | Get recent refresh history — status, start/end times, errors |
+| `powerbi_get_refresh_schedule` | `user_id`, `workspace_id`, `dataset_id` | Get the configured scheduled refresh settings |
+| `powerbi_list_reports` | `user_id`, `workspace_id` | List all reports in a workspace with embed URLs |
+
+**Refresh limits:** Power BI Pro = 8 on-demand refreshes/day per dataset. Premium capacity = 48/day.
+
+**Typical workflow:**
+```
+powerbi_list_workspaces → powerbi_list_datasets → powerbi_refresh_dataset → powerbi_get_refresh_history
+```
+
+---
+
 ## Architecture
 
 ```
@@ -262,15 +298,15 @@ POST /mcp  (JSON-RPC 2.0)
      ├── tools/todo.py          (8 tools)
      ├── tools/excel.py         (7 tools)
      ├── tools/users.py         (7 tools)
-     └── tools/office_docs.py   (2 tools)
+     ├── tools/office_docs.py   (2 tools)
+     └── tools/powerbi.py       (7 tools)  ← NEW
           │
-          ▼
-     clients/graph_client.py   ←  httpx-based Graph API client
-          │
-          ▼
-     auth/oauth_web.py         ←  token retrieval + refresh
-     auth/device_code.py       ←  MSAL device code flow
-     auth/token_store_pg.py    ←  PostgreSQL token persistence
+          ├── clients/graph_client.py    ←  Microsoft Graph API (httpx)
+          └── clients/powerbi_client.py  ←  Power BI REST API (httpx)  ← NEW
+               │
+               ├── auth/oauth_web.py         ←  token retrieval + refresh
+               ├── auth/device_code.py       ←  MSAL device code flow
+               └── auth/token_store_pg.py    ←  PostgreSQL token persistence
 ```
 
 ---
@@ -284,6 +320,16 @@ POST /mcp  (JSON-RPC 2.0)
 | `contains()` in `$filter` | Not supported on mail — use `$search` for keyword matching |
 | `$expand=members` on `/me/chats` | Requires `ChatMember.Read.All` — use `include_members: true` only if that permission is granted |
 | OneDrive copy | Async — returns 202 immediately; copy completes in background |
+
+## Known Power BI Constraints
+
+| Constraint | Detail |
+|---|---|
+| Refresh is async | `powerbi_refresh_dataset` returns `202 Accepted` immediately — use `powerbi_get_refresh_history` to poll for completion |
+| Pro refresh limit | 8 on-demand refreshes per dataset per day |
+| Premium refresh limit | 48 on-demand refreshes per dataset per day |
+| My Workspace | Use `workspace_id='me'` — this workspace has no group ID |
+| Re-authentication | Users must re-authenticate after Power BI permissions are added to the app registration |
 
 ---
 
