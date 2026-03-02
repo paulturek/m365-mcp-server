@@ -1,29 +1,25 @@
-"""Device Code Flow for M365 MCP Server.
+"""Device code authentication flow for M365 MCP Server.
 
-Enables in-chat authentication: the assistant presents a code + URL,
-the user enters the code at microsoft.com/devicelogin, and the server
-polls in the background until authentication completes.
-
-Prerequisites:
-  - Azure Portal → App Registration → Authentication →
-    "Allow public client flows" must be set to **Yes**
-  - AZURE_CLIENT_ID and AZURE_TENANT_ID environment variables
+Provides inline device-code auth via MCP tools:
+  - auth_start_device_login  → returns user_code + verification_uri
+  - auth_check_device_login  → polls Azure AD and stores token on success
 """
 
-import os
-import json
-import logging
 import asyncio
-import inspect
+import logging
+import os
 from typing import Any
 
 import msal
 
-logger = logging.getLogger("m365_mcp.auth.device_code")
+from ..token_store import PgTokenStore, FileTokenStore, TokenStore
+from cryptography.fernet import Fernet
 
-# ---------------------------------------------------------------------------
-# Graph delegated scopes — must match those in the OAuth web flow
-# ---------------------------------------------------------------------------
+logger = logging.getLogger("m365_mcp")
+
+# ── Canonical scope list ──────────────────────────────────────────────────────
+# DIAGNOSTIC: logged verbatim before every Azure AD call.
+# Must match auth/oauth_web.py SCOPES exactly.
 GRAPH_SCOPES = [
     "User.Read",
     "User.ReadBasic.All",
@@ -38,202 +34,112 @@ GRAPH_SCOPES = [
     "Tasks.ReadWrite",
 ]
 
-# ---------------------------------------------------------------------------
-# In-memory state for pending / completed device-code flows
-# ---------------------------------------------------------------------------
+# ── Azure AD app credentials ──────────────────────────────────────────────────
+CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
+TENANT_ID = os.environ.get("AZURE_TENANT_ID", "common")
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+
+# ── Token store ───────────────────────────────────────────────────────────────
+_ENCRYPTION_KEY = os.environ.get("TOKEN_ENCRYPTION_KEY", "")
+_DATABASE_URL   = os.environ.get("DATABASE_URL", "")
+
+def _get_token_store() -> TokenStore:
+    if _DATABASE_URL:
+        return PgTokenStore(_ENCRYPTION_KEY, _DATABASE_URL)
+    return FileTokenStore(_ENCRYPTION_KEY)
+
+# ── In-memory flow cache (keyed by user_id) ───────────────────────────────────
 _pending_flows: dict[str, dict] = {}
-_flow_results: dict[str, dict] = {}
-_polling_tasks: dict[str, asyncio.Task] = {}
 
 
-# ---------------------------------------------------------------------------
-# MSAL public client (no client_secret needed for device-code flow)
-# ---------------------------------------------------------------------------
-def _public_client_app() -> msal.PublicClientApplication:
-    return msal.PublicClientApplication(
-        client_id=os.environ["AZURE_CLIENT_ID"],
-        authority=f"https://login.microsoftonline.com/{os.environ['AZURE_TENANT_ID']}",
-    )
+async def _pg_store_token(user_id: str, token_data: dict) -> None:
+    """Persist token to PostgreSQL token store."""
+    store = _get_token_store()
+    await store.save_token(user_id, token_data)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-async def start_device_flow(user_id: str) -> dict:
-    """Initiate a device-code flow and begin background polling.
+async def start_device_login(user_id: str) -> dict[str, Any]:
+    """Initiate a device-code flow for *user_id*.
 
-    Returns a dict with user_code, verification_uri, and a human-readable
-    message the assistant can present directly in chat.
+    Returns a dict with ``user_code``, ``verification_uri``, and
+    ``expires_in`` for display to the user.
     """
-    # Cancel any existing flow for this user
-    if user_id in _polling_tasks:
-        _polling_tasks[user_id].cancel()
-        _polling_tasks.pop(user_id, None)
+    # ── DIAGNOSTIC ────────────────────────────────────────────────────────────
+    logger.info("DIAG device_code.py GRAPH_SCOPES (%d): %s",
+                len(GRAPH_SCOPES), " ".join(GRAPH_SCOPES))
+    logger.info("DIAG CLIENT_ID=%s  TENANT_ID=%s  AUTHORITY=%s",
+                CLIENT_ID, TENANT_ID, AUTHORITY)
+    # ─────────────────────────────────────────────────────────────────────────
 
-    app = _public_client_app()
+    app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY)
+
+    logger.info("DIAG calling initiate_device_flow with scopes: %s", GRAPH_SCOPES)
     flow = app.initiate_device_flow(scopes=GRAPH_SCOPES)
 
-    if "user_code" not in flow:
-        return {
-            "status": "error",
-            "error": flow.get(
-                "error_description", "Could not initiate device-code flow"
-            ),
-            "hint": (
-                "Ensure 'Allow public client flows' is set to Yes in "
-                "Azure Portal → App Registration → Authentication."
-            ),
-        }
+    if "error" in flow:
+        logger.error("DIAG device_flow error response: %s", flow)
+        raise RuntimeError(f"Device flow error: {flow.get('error_description', flow)}")
 
-    _pending_flows[user_id] = flow
-    _flow_results.pop(user_id, None)
+    _pending_flows[user_id] = {"flow": flow, "app": app}
 
-    # Start background polling (runs until user completes or flow expires)
-    task = asyncio.create_task(_poll_for_token(user_id, app, flow))
-    _polling_tasks[user_id] = task
-
-    logger.info(
-        "Device-code flow started for %s (code=%s, expires=%ss)",
-        user_id,
-        flow["user_code"],
-        flow.get("expires_in", "?"),
-    )
+    logger.info("DIAG device flow initiated OK for %s — user_code=%s",
+                user_id, flow.get("user_code"))
 
     return {
-        "status": "pending",
-        "user_code": flow["user_code"],
+        "user_code":        flow["user_code"],
         "verification_uri": flow["verification_uri"],
-        "message": (
-            f"To sign in, visit **{flow['verification_uri']}** "
-            f"and enter the code **{flow['user_code']}**"
-        ),
-        "expires_in_seconds": flow.get("expires_in", 900),
+        "expires_in":       flow.get("expires_in", 900),
+        "message":          flow.get("message", ""),
     }
 
 
-def get_flow_status(user_id: str) -> dict:
-    """Return the current device-code flow status for a user.
+async def check_device_login(user_id: str) -> dict[str, Any]:
+    """Poll Azure AD for token completion.
 
-    Possible statuses: completed, pending, failed, cancelled, no_flow.
-    Completed/failed results are consumed (returned once then cleared).
+    Returns ``{"status": "pending"}`` while the user hasn't authenticated,
+    ``{"status": "success"}`` on completion, or raises on error.
     """
-    if user_id in _flow_results:
-        return _flow_results.pop(user_id)
+    if user_id not in _pending_flows:
+        return {"status": "error", "message": "No pending flow. Call start_device_login first."}
 
-    if user_id in _pending_flows:
-        return {
-            "status": "pending",
-            "user_code": _pending_flows[user_id].get("user_code", ""),
-            "message": "Waiting for you to complete sign-in...",
-        }
+    entry = _pending_flows[user_id]
+    app: msal.PublicClientApplication = entry["app"]
+    flow: dict = entry["flow"]
 
-    return {"status": "no_flow"}
+    logger.info("DIAG check_device_login polling for %s", user_id)
 
+    result = app.acquire_token_by_device_flow(flow, timeout=5)
 
-# ---------------------------------------------------------------------------
-# Background polling
-# ---------------------------------------------------------------------------
-async def _poll_for_token(
-    user_id: str,
-    app: msal.PublicClientApplication,
-    flow: dict,
-) -> None:
-    """Block-poll Microsoft until the user completes auth or the flow expires."""
-    try:
-        # acquire_token_by_device_flow is synchronous/blocking — run in thread
-        result = await asyncio.to_thread(app.acquire_token_by_device_flow, flow)
+    if "error" in result:
+        err = result.get("error", "")
+        desc = result.get("error_description", "")
 
-        if "access_token" in result:
-            logger.info("Device-code flow completed for %s", user_id)
-            _flow_results[user_id] = {"status": "completed"}
-            await _persist_token(user_id, result)
-        else:
-            error = result.get(
-                "error_description", result.get("error", "Unknown error")
-            )
-            logger.warning("Device-code flow failed for %s: %s", user_id, error)
-            _flow_results[user_id] = {"status": "failed", "error": error}
+        logger.error("DIAG acquire_token_by_device_flow error: %s — %s", err, desc)
 
-    except asyncio.CancelledError:
-        logger.info("Device-code flow cancelled for %s", user_id)
-        _flow_results[user_id] = {"status": "cancelled"}
-    except Exception as exc:
-        logger.exception("Device-code polling error for %s", user_id)
-        _flow_results[user_id] = {"status": "failed", "error": str(exc)}
-    finally:
-        _pending_flows.pop(user_id, None)
-        _polling_tasks.pop(user_id, None)
+        if err == "authorization_pending":
+            return {"status": "pending"}
 
+        # Any other error — surface it clearly
+        return {"status": "error", "message": f"{err}: {desc}"}
 
-# ---------------------------------------------------------------------------
-# Token persistence — delegates to the existing OAuth token store
-# ---------------------------------------------------------------------------
-async def _persist_token(user_id: str, token_result: dict) -> None:
-    """Store the acquired token so existing M365 tools can use it.
+    # ── Success ───────────────────────────────────────────────────────────────
+    logger.info("DIAG token acquired for %s — scopes granted: %s",
+                user_id, result.get("scope", ""))
 
-    Primary path: import store_token from oauth_web (same store as code-flow).
-    Fallback:     direct PostgreSQL upsert into oauth_tokens table.
-    """
-    # --- Primary: reuse oauth_web's store ---
-    try:
-        from .oauth_web import store_token
+    token_data = {
+        "access_token":  result["access_token"],
+        "refresh_token": result.get("refresh_token", ""),
+        "expires_in":    result.get("expires_in", 3600),
+        "scope":         result.get("scope", ""),
+        "token_type":    result.get("token_type", "Bearer"),
+    }
 
-        if inspect.iscoroutinefunction(store_token):
-            await store_token(user_id, token_result)
-        else:
-            store_token(user_id, token_result)
-        logger.info("Token persisted for %s via oauth_web.store_token", user_id)
-        return
-    except (ImportError, AttributeError) as exc:
-        logger.info(
-            "oauth_web.store_token unavailable (%s); falling back to direct PG",
-            exc,
-        )
+    await _pg_store_token(user_id, token_data)
+    del _pending_flows[user_id]
 
-    # --- Fallback: direct PostgreSQL ---
-    await _pg_store_token(user_id, token_result)
+    logger.info("DIAG token stored for %s", user_id)
 
-
-# ---------------------------------------------------------------------------
-# Fallback: direct PostgreSQL token persistence
-# ---------------------------------------------------------------------------
-async def _pg_store_token(user_id: str, token_result: dict) -> None:
-    """Direct PostgreSQL upsert into oauth_tokens table."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        raise RuntimeError(
-            "Cannot persist device-code token: "
-            "oauth_web.store_token not importable and DATABASE_URL not set."
-        )
-
-    import psycopg2
-
-    def _upsert():
-        conn = psycopg2.connect(db_url)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS oauth_tokens (
-                        user_id     TEXT PRIMARY KEY,
-                        token_data  JSONB NOT NULL,
-                        updated_at  TIMESTAMPTZ DEFAULT now()
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    INSERT INTO oauth_tokens (user_id, token_data, updated_at)
-                    VALUES (%s, %s, now())
-                    ON CONFLICT (user_id) DO UPDATE
-                      SET token_data  = EXCLUDED.token_data,
-                          updated_at  = now()
-                    """,
-                    (user_id, json.dumps(token_result)),
-                )
-                conn.commit()
-        finally:
-            conn.close()
-
-    await asyncio.to_thread(_upsert)
-    logger.info("Token persisted for %s via direct PG fallback", user_id)
+    return {
+        "status":  "success",
+        "message": f"Authenticated successfully. Scopes granted: {token_data['scope']}",
+    }
