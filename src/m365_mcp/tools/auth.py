@@ -31,15 +31,21 @@ def _get_msal_public_app():
     )
 
 
+# ---------------------------------------------------------------------------
+# Graph delegated scopes — must match those in auth/oauth_web.py
+# ---------------------------------------------------------------------------
 SCOPES = [
     "User.Read",
-    "Files.ReadWrite.All",
+    "User.ReadBasic.All",
     "Mail.ReadWrite",
+    "Mail.Send",
     "Calendars.ReadWrite",
+    "Files.ReadWrite.All",
     "Sites.ReadWrite.All",
+    "Team.ReadBasic.All",
+    "Channel.ReadBasic.All",
     "ChannelMessage.Send",
     "Tasks.ReadWrite",
-    "https://analysis.windows.net/powerbi/api/.default",
 ]
 
 # In-memory device flow state: user_id → msal flow dict
