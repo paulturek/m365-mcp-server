@@ -194,6 +194,9 @@ async def _persist_token(user_id: str, token_result: dict) -> None:
     await _pg_store_token(user_id, token_result)
 
 
+# ---------------------------------------------------------------------------
+# Fallback: direct PostgreSQL token persistence
+# ---------------------------------------------------------------------------
 async def _pg_store_token(user_id: str, token_result: dict) -> None:
     """Direct PostgreSQL upsert into oauth_tokens table."""
     db_url = os.environ.get("DATABASE_URL", "")

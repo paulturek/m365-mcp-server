@@ -43,12 +43,19 @@ REDIRECT_URI: str = os.environ.get("OAUTH_REDIRECT_URI", "")
 # Any email with a different domain is rewritten before token ops.
 USER_EMAIL_DOMAIN: str = os.environ.get("USER_EMAIL_DOMAIN", "")
 
+# ---------------------------------------------------------------------------
+# Graph delegated scopes — must match those in device_code.py
+# ---------------------------------------------------------------------------
 SCOPES = [
     "User.Read",
-    "Files.ReadWrite.All",
+    "User.ReadBasic.All",
     "Mail.ReadWrite",
+    "Mail.Send",
     "Calendars.ReadWrite",
+    "Files.ReadWrite.All",
     "Sites.ReadWrite.All",
+    "Team.ReadBasic.All",
+    "Channel.ReadBasic.All",
     "ChannelMessage.Send",
     "Tasks.ReadWrite",
 ]
