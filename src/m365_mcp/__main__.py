@@ -1,6 +1,6 @@
 """M365 MCP Server — FastAPI + MCP JSON-RPC 2.0 dispatcher.
 
-v2.1.0: Multi-user OAuth, modular tool registry, Power BI integration.
+v2.1.0: Multi-user OAuth, modular tool registry.
 
 All tool definitions and handlers are imported from the tools/ package.
 Auth is handled by auth/oauth_web.py (multi-user, auto-refresh).
@@ -15,10 +15,9 @@ Endpoints:
 """
 
 import os
-import sys
 import time
 import logging
-import asyncio
+from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
@@ -54,27 +53,6 @@ SERVER_NAME = "m365-mcp-server"
 SERVER_VERSION = "2.1.0"
 
 # ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title=SERVER_NAME,
-    version=SERVER_VERSION,
-    docs_url=None,
-    redoc_url=None,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Mount auth routes: /auth/login, /auth/callback, /auth/status, /auth/revoke
-app.include_router(auth_router)
-
-# ---------------------------------------------------------------------------
 # MCP bearer-token guard (server-level, independent of per-user OAuth)
 # ---------------------------------------------------------------------------
 MCP_BEARER_TOKEN = os.environ.get("MCP_BEARER_TOKEN", "")
@@ -89,6 +67,55 @@ def _verify_mcp_bearer(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     if auth_header[7:] != MCP_BEARER_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid Bearer token")
+
+
+# ---------------------------------------------------------------------------
+# Startup banner
+# ---------------------------------------------------------------------------
+def _log_startup_banner():
+    token_backend = os.environ.get("TOKEN_STORE_BACKEND", "file")
+    logger.info("=" * 60)
+    logger.info("%s v%s starting", SERVER_NAME, SERVER_VERSION)
+    logger.info("MCP protocol: %s", MCP_PROTOCOL_VERSION)
+    logger.info("Tools loaded: %d", len(TOOL_REGISTRY))
+    logger.info("MCP bearer:   %s", "configured" if MCP_BEARER_TOKEN else "OPEN (dev mode)")
+    logger.info("OAuth:        /auth/login?user_id=<email>")
+    logger.info("Token store:  %s", token_backend)
+    logger.info("Tool list:    %s", ", ".join(t["name"] for t in TOOL_REGISTRY))
+    logger.info("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan (replaces deprecated @app.on_event)
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _log_startup_banner()
+    yield
+    # shutdown logic here if needed
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title=SERVER_NAME,
+    version=SERVER_VERSION,
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount auth routes: /auth/login, /auth/callback, /auth/status, /auth/revoke
+app.include_router(auth_router)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +168,6 @@ async def _handle_tools_call(params: dict) -> dict:
             "isError": False,
         }
     except HTTPException as exc:
-        # Auth errors bubble up cleanly
         return {
             "content": [
                 {"type": "text", "text": f"Auth error: {exc.detail}"}
@@ -159,7 +185,6 @@ async def _handle_tools_call(params: dict) -> dict:
 
 
 async def _handle_ping(params: dict) -> dict:
-    """Respond to MCP ping requests."""
     return {}
 
 
@@ -198,7 +223,7 @@ async def mcp_handler(request: Request):
         logger.debug("Notification received: %s", method)
         return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
 
-    # Any other notification without id — accept silently, don't 400
+    # Any other notification without id — accept silently
     if req_id is None and method not in _MCP_METHODS:
         logger.debug("Unknown notification ignored: %s", method)
         return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
@@ -239,23 +264,6 @@ async def health():
         "version": SERVER_VERSION,
         "tools_loaded": len(TOOL_REGISTRY),
     }
-
-
-# ---------------------------------------------------------------------------
-# Startup banner
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def _startup():
-    token_backend = os.environ.get("TOKEN_STORE_BACKEND", "file")
-    logger.info("=" * 60)
-    logger.info("%s v%s starting", SERVER_NAME, SERVER_VERSION)
-    logger.info("MCP protocol: %s", MCP_PROTOCOL_VERSION)
-    logger.info("Tools loaded: %d", len(TOOL_REGISTRY))
-    logger.info("MCP bearer:   %s", "configured" if MCP_BEARER_TOKEN else "OPEN (dev mode)")
-    logger.info("OAuth:        /auth/login?user_id=<email>")
-    logger.info("Token store:  %s", token_backend)
-    logger.info("Tool list:    %s", ", ".join(t["name"] for t in TOOL_REGISTRY))
-    logger.info("=" * 60)
 
 
 # ---------------------------------------------------------------------------
