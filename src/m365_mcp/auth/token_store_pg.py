@@ -42,15 +42,13 @@ class PgTokenStore(TokenStore):
         self._pool = None
         self._init_lock = asyncio.Lock()
 
-    # -- pool management -------------------------------------------------
-
     async def _ensure_pool(self):
         if self._pool is not None:
             return self._pool
         async with self._init_lock:
             if self._pool is not None:
                 return self._pool
-            import asyncpg  # noqa: delayed import keeps dep optional
+            import asyncpg
 
             self._pool = await asyncpg.create_pool(
                 dsn=self._dsn, min_size=1, max_size=5
@@ -65,15 +63,11 @@ class PgTokenStore(TokenStore):
             await self._pool.close()
             self._pool = None
 
-    # -- helpers ---------------------------------------------------------
-
     def _encrypt(self, data: dict) -> bytes:
         return self._fernet.encrypt(json.dumps(data).encode())
 
     def _decrypt(self, blob: bytes) -> dict:
         return json.loads(self._fernet.decrypt(bytes(blob)))
-
-    # -- public ----------------------------------------------------------
 
     async def get(self, user_id: str) -> Optional[dict]:
         pool = await self._ensure_pool()
