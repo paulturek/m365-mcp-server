@@ -287,22 +287,25 @@ async def _list_files(params: dict) -> dict:
     else:
         encoded = _encode_path(path.strip("/"))
         endpoint = f"/me/drive/root:/{encoded}:/children"
-    data = await client.get(endpoint)
-    items = data.get("value", [])
-    return {
-        "count": len(items),
-        "items": [
+
+    items = []
+    async for raw in client.get_paginated(
+        endpoint, params={"$top": 999}, max_pages=50
+    ):
+        items.append(
             {
-                "name": i.get("name"),
-                "type": "folder" if "folder" in i else "file",
-                "size": i.get("size"),
-                "id": i.get("id"),
-                "lastModified": i.get("lastModifiedDateTime"),
-                "webUrl": i.get("webUrl"),
+                "name": raw.get("name"),
+                "type": "folder" if "folder" in raw else "file",
+                "size": raw.get("size"),
+                "id": raw.get("id"),
+                "lastModified": raw.get("lastModifiedDateTime"),
+                "webUrl": raw.get("webUrl"),
             }
-            for i in items
-        ],
-    }
+        )
+    logger.debug(
+        "onedrive_list_files: returned %d items for path=%s", len(items), path
+    )
+    return {"count": len(items), "items": items}
 
 
 async def _download_file(params: dict) -> dict:
@@ -394,7 +397,7 @@ async def _share_item(params: dict) -> dict:
 
 
 async def _move_item(params: dict) -> dict:
-    """PATCH /me/drive/items/{id} — move item by changing parentReference."""
+    """PATCH /me/drive/items/{id} \u2014 move item by changing parentReference."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     endpoint = _resolve_item_endpoint(params)
@@ -422,7 +425,7 @@ async def _move_item(params: dict) -> dict:
 
 
 async def _rename_item(params: dict) -> dict:
-    """PATCH /me/drive/items/{id} — rename item."""
+    """PATCH /me/drive/items/{id} \u2014 rename item."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     endpoint = _resolve_item_endpoint(params)
@@ -437,7 +440,7 @@ async def _rename_item(params: dict) -> dict:
 
 
 async def _copy_item(params: dict) -> dict:
-    """POST /me/drive/items/{id}/copy — async copy operation."""
+    """POST /me/drive/items/{id}/copy \u2014 async copy operation."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
 
@@ -471,31 +474,36 @@ async def _copy_item(params: dict) -> dict:
 
 
 async def _search(params: dict) -> dict:
-    """GET /me/drive/root/search(q='...') — search OneDrive."""
+    """GET /me/drive/root/search(q='...') \u2014 search OneDrive with pagination."""
     token = await get_access_token(params["user_id"])
     client = GraphClient(token)
     top = params.get("top", 25)
     query = params["query"]
-    data = await client.get(
+
+    items = []
+    async for raw in client.get_paginated(
         f"/me/drive/root/search(q='{quote(query, safe='')}')",
-        params={"$top": top},
-    )
-    items = data.get("value", [])
-    return {
-        "count": len(items),
-        "items": [
+        params={"$top": min(top, 999)},
+        max_pages=50,
+    ):
+        items.append(
             {
-                "name": i.get("name"),
-                "type": "folder" if "folder" in i else "file",
-                "size": i.get("size"),
-                "id": i.get("id"),
-                "lastModified": i.get("lastModifiedDateTime"),
-                "webUrl": i.get("webUrl"),
-                "parentPath": i.get("parentReference", {}).get("path"),
+                "name": raw.get("name"),
+                "type": "folder" if "folder" in raw else "file",
+                "size": raw.get("size"),
+                "id": raw.get("id"),
+                "lastModified": raw.get("lastModifiedDateTime"),
+                "webUrl": raw.get("webUrl"),
+                "parentPath": raw.get("parentReference", {}).get("path"),
             }
-            for i in items
-        ],
-    }
+        )
+        if len(items) >= top:
+            break
+
+    logger.debug(
+        "onedrive_search: returned %d items for query=%s", len(items), query
+    )
+    return {"count": len(items), "items": items}
 
 
 HANDLERS = {
