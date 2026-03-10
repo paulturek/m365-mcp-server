@@ -6,8 +6,6 @@ from typing import Any
 
 import msal
 
-from ..token_store import PgTokenStore, FileTokenStore, TokenStore
-
 logger = logging.getLogger("m365_mcp")
 
 GRAPH_SCOPES = [
@@ -28,23 +26,8 @@ CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
 TENANT_ID = os.environ.get("AZURE_TENANT_ID", "common")
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
-_ENCRYPTION_KEY = os.environ.get("TOKEN_ENCRYPTION_KEY", "")
-_DATABASE_URL   = os.environ.get("DATABASE_URL", "")
-
-
-def _get_token_store() -> TokenStore:
-    if _DATABASE_URL:
-        return PgTokenStore(_ENCRYPTION_KEY, _DATABASE_URL)
-    return FileTokenStore(_ENCRYPTION_KEY)
-
-
 # In-memory flow cache keyed by user_id
 _pending_flows: dict[str, dict] = {}
-
-
-async def _pg_store_token(user_id: str, token_data: dict) -> None:
-    store = _get_token_store()
-    await store.save_token(user_id, token_data)
 
 
 async def start_device_login(user_id: str) -> dict[str, Any]:
@@ -56,11 +39,17 @@ async def start_device_login(user_id: str) -> dict[str, Any]:
 
     if "error" in flow:
         logger.error("device_flow error: %s", flow)
-        raise RuntimeError(f"Device flow error: {flow.get('error_description', flow)}")
+        raise RuntimeError(
+            f"Device flow error: {flow.get('error_description', flow)}"
+        )
 
     _pending_flows[user_id] = {"flow": flow, "app": app}
 
-    logger.info("device_flow initiated for %s — user_code=%s", user_id, flow.get("user_code"))
+    logger.info(
+        "device_flow initiated for %s — user_code=%s",
+        user_id,
+        flow.get("user_code"),
+    )
 
     return {
         "user_code":        flow["user_code"],
@@ -77,7 +66,10 @@ start_device_flow = start_device_login
 async def check_device_login(user_id: str) -> dict[str, Any]:
     """Poll Azure AD for token. Returns status: pending | success | error."""
     if user_id not in _pending_flows:
-        return {"status": "error", "message": "No pending flow. Call start_device_login first."}
+        return {
+            "status": "error",
+            "message": "No pending flow. Call start_device_login first.",
+        }
 
     entry = _pending_flows[user_id]
     app: msal.PublicClientApplication = entry["app"]
@@ -95,21 +87,24 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
 
         return {"status": "error", "message": f"{err}: {desc}"}
 
-    # Success
-    logger.info("device_flow success for %s — scopes: %s", user_id, result.get("scope", ""))
+    # ── Success ────────────────────────────────────────────────────────
+    logger.info(
+        "device_flow success for %s — scopes: %s",
+        user_id,
+        result.get("scope", ""),
+    )
 
-    token_data = {
-        "access_token":  result["access_token"],
-        "refresh_token": result.get("refresh_token", ""),
-        "expires_in":    result.get("expires_in", 3600),
-        "scope":         result.get("scope", ""),
-        "token_type":    result.get("token_type", "Bearer"),
-    }
+    # Delegate to oauth_web.store_token — handles domain normalization,
+    # expires_at calculation, display_name extraction, and PgTokenStore
+    # persistence via the shared singleton.  Lazy import avoids circular
+    # dependency (oauth_web imports us lazily too).
+    from .oauth_web import store_token
 
-    await _pg_store_token(user_id, token_data)
+    await store_token(user_id, result)
     del _pending_flows[user_id]
 
+    scope = result.get("scope", "")
     return {
         "status":  "success",
-        "message": f"Authenticated successfully. Scopes granted: {token_data['scope']}",
+        "message": f"Authenticated successfully. Scopes granted: {scope}",
     }
