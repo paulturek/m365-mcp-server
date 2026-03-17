@@ -94,14 +94,46 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
         result.get("scope", ""),
     )
 
+    # Clean up pending flow FIRST — prevents memory leak if store fails
+    del _pending_flows[user_id]
+
     # Delegate to oauth_web.store_token — handles domain normalization,
     # expires_at calculation, display_name extraction, and PgTokenStore
     # persistence via the shared singleton.  Lazy import avoids circular
     # dependency (oauth_web imports us lazily too).
-    from .oauth_web import store_token
+    #
+    # FIX: Pass client_type="public" so that get_access_token() uses
+    # PublicClientApplication (not ConfidentialClientApplication) when
+    # refreshing this token.  This was the root cause of the token
+    # "evaporation" bug — Azure AD rejects refresh_token from a public
+    # client when presented by a confidential client.
+    try:
+        from .oauth_web import store_token
 
-    await store_token(user_id, result)
-    del _pending_flows[user_id]
+        await store_token(user_id, result, client_type="public")
+        logger.info(
+            "DEVICE_CODE_PERSIST: Token saved and verified for %s", user_id
+        )
+    except Exception as exc:
+        logger.critical(
+            "DEVICE_CODE_PERSIST_FAILED: Token acquired but SAVE FAILED "
+            "for %s: %s",
+            user_id,
+            exc,
+            exc_info=True,
+        )
+        # Return success with persistence warning so user knows auth
+        # worked but the token won't survive across calls.
+        scope = result.get("scope", "")
+        return {
+            "status":  "success",
+            "message": (
+                f"Authenticated (scopes: {scope}) but token persistence "
+                f"FAILED: {exc}.  Token may not survive across calls. "
+                f"Check DATABASE_URL and TOKEN_ENCRYPTION_KEY."
+            ),
+            "persistence_error": str(exc),
+        }
 
     scope = result.get("scope", "")
     return {
