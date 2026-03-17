@@ -98,6 +98,23 @@ def _get_msal_app() -> msal.ConfidentialClientApplication:
     )
 
 
+def _get_msal_app_for_refresh(client_type: str = "confidential"):
+    """Return the correct MSAL application for token refresh.
+
+    Device code flow tokens are issued by a PublicClientApplication.
+    Azure AD rejects refresh attempts using a ConfidentialClientApplication
+    for tokens originally issued to a public client.  This helper ensures
+    the right client type is used based on how the token was originally
+    acquired.
+    """
+    if client_type == "public":
+        return msal.PublicClientApplication(
+            client_id=CLIENT_ID,
+            authority=f"https://login.microsoftonline.com/{TENANT_ID}",
+        )
+    return _get_msal_app()
+
+
 # ---------------------------------------------------------------------------
 # Domain normalization
 # ---------------------------------------------------------------------------
@@ -219,12 +236,29 @@ async def get_access_token(user_id: str) -> str:
         detail = await _auto_device_code(user_id)
         raise HTTPException(status_code=401, detail=detail)
 
-    app = _get_msal_app()
+    # FIX: Use the correct MSAL client type for refresh.
+    # Device code tokens were issued by PublicClientApplication and MUST
+    # be refreshed by one.  Existing tokens without client_type default
+    # to "confidential" (backward compatible with web-flow tokens).
+    client_type = cache.get("client_type", "confidential")
+    app = _get_msal_app_for_refresh(client_type)
     result = app.acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
 
     if "access_token" not in result:
-        logger.error("Refresh failed for %s: %s", user_id, result.get("error_description"))
-        await store.delete(user_id)
+        error_desc = result.get("error_description", "unknown")
+        logger.error(
+            "Refresh failed for %s (client_type=%s): %s",
+            user_id, client_type, error_desc,
+        )
+        # FIX: Do NOT delete the token on refresh failure.
+        # The old code did `await store.delete(user_id)` here, which
+        # destroyed the token even on transient failures.  The token
+        # is preserved so the user can re-auth without losing the row.
+        logger.warning(
+            "TOKEN_REFRESH_FAILED for %s — starting device code flow "
+            "(token preserved in DB for diagnostics)",
+            user_id,
+        )
         detail = await _auto_device_code(user_id)
         raise HTTPException(status_code=401, detail=detail)
 
@@ -235,21 +269,33 @@ async def get_access_token(user_id: str) -> str:
         "scope": result.get("scope", ""),
         "display_name": cache.get("display_name", user_id),
         "authorized_at": cache.get("authorized_at", time.time()),
+        "client_type": client_type,  # Preserve client_type through refresh
         "last_refreshed": time.time(),
     }
     await store.save(user_id, updated)
-    logger.info("Token refreshed for %s", user_id)
+    logger.info("Token refreshed for %s (client_type=%s)", user_id, client_type)
     return updated["access_token"]
 
 
 # ---------------------------------------------------------------------------
 # Public: store token (used by device_code.py after successful auth)
 # ---------------------------------------------------------------------------
-async def store_token(user_id: str, token_result: dict) -> None:
+async def store_token(
+    user_id: str,
+    token_result: dict,
+    client_type: str = "confidential",
+) -> None:
     """Persist a token from any auth flow (device-code, web, etc.).
 
     Normalises the user_id domain and the MSAL result dict into the
     format expected by get_access_token, then saves to the token store.
+
+    Args:
+        user_id: User email / identifier.
+        token_result: MSAL token result dict.
+        client_type: "public" for device code flow, "confidential" for
+                     web flow.  Determines which MSAL client type is
+                     used when refreshing the token later.
     """
     # Normalize domain before storage
     user_id = _normalize_user_id(user_id)
@@ -269,12 +315,31 @@ async def store_token(user_id: str, token_result: dict) -> None:
         "display_name": display_name,
         "microsoft_oid": id_claims.get("oid", ""),
         "authorized_at": time.time(),
+        "client_type": client_type,
         "last_refreshed": time.time(),
     }
 
     store = _get_store()
     await store.save(user_id, token_data)
-    logger.info("Token stored for %s (%s)", display_name, user_id)
+    logger.info(
+        "Token stored for %s (%s) [client_type=%s, has_refresh=%s]",
+        display_name, user_id, client_type,
+        bool(token_data["refresh_token"]),
+    )
+
+    # Verify the save succeeded by reading back
+    verify = await store.get(user_id)
+    if not verify:
+        raise RuntimeError(
+            f"Token verification failed: saved token for {user_id} but "
+            f"read-back returned None. Check database connectivity."
+        )
+    if verify.get("access_token") != token_data["access_token"]:
+        raise RuntimeError(
+            f"Token verification failed: read-back access_token mismatch "
+            f"for {user_id}. Possible encryption key issue."
+        )
+    logger.info("STORE_VERIFIED: Token read-back confirmed for %s", user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +410,8 @@ async def callback(request: Request):
         )
 
     # Use the shared store_token function (handles normalization)
-    await store_token(user_id, result)
+    # Web callback flow uses confidential client (default)
+    await store_token(user_id, result, client_type="confidential")
 
     id_claims = result.get("id_token_claims", {})
     display_name = (
