@@ -1,11 +1,11 @@
-"""Option B — PostgreSQL-backed encrypted token store.
+"""Option B \u2014 PostgreSQL-backed encrypted token store.
 
 Survives container redeployments. Uses asyncpg for async I/O
 and Fernet for at-rest encryption of token blobs.
 
 Config env vars:
-  DATABASE_URL          — Postgres connection string
-  TOKEN_ENCRYPTION_KEY  — Fernet key
+  DATABASE_URL          \u2014 Postgres connection string
+  TOKEN_ENCRYPTION_KEY  \u2014 Fernet key
 """
 import json
 import time
@@ -57,6 +57,15 @@ class PgTokenStore(TokenStore):
                 await conn.execute(CREATE_TABLE_SQL)
             logger.info("PgTokenStore: pool ready, table ensured")
             return self._pool
+
+    async def ensure_ready(self):
+        """Eagerly initialize the connection pool and create the table.
+
+        Call this at application startup (e.g. FastAPI lifespan) so the
+        first real request doesn't pay the pool-creation cost and any
+        database connectivity issues surface immediately.
+        """
+        await self._ensure_pool()
 
     async def close(self):
         if self._pool:

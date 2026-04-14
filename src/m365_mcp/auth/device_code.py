@@ -1,5 +1,6 @@
 """Device code authentication flow for M365 MCP Server."""
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -46,7 +47,7 @@ async def start_device_login(user_id: str) -> dict[str, Any]:
     _pending_flows[user_id] = {"flow": flow, "app": app}
 
     logger.info(
-        "device_flow initiated for %s — user_code=%s",
+        "device_flow initiated for %s \u2014 user_code=%s",
         user_id,
         flow.get("user_code"),
     )
@@ -75,29 +76,28 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
     app: msal.PublicClientApplication = entry["app"]
     flow: dict = entry["flow"]
 
-    result = app.acquire_token_by_device_flow(flow, timeout=5)
+    result = await asyncio.to_thread(
+        app.acquire_token_by_device_flow, flow, timeout=5
+    )
 
     if "error" in result:
         err  = result.get("error", "")
         desc = result.get("error_description", "")
-        logger.info("device_flow poll: %s — %s", err, desc)
+        logger.info("device_flow poll: %s \u2014 %s", err, desc)
 
         if err == "authorization_pending":
             return {"status": "pending"}
 
         return {"status": "error", "message": f"{err}: {desc}"}
 
-    # ── Success ────────────────────────────────────────────────────────
+    # \u2500\u2500 Success \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     logger.info(
-        "device_flow success for %s — scopes: %s",
+        "device_flow success for %s \u2014 scopes: %s",
         user_id,
         result.get("scope", ""),
     )
 
-    # Clean up pending flow FIRST — prevents memory leak if store fails
-    del _pending_flows[user_id]
-
-    # Delegate to oauth_web.store_token — handles domain normalization,
+    # Delegate to oauth_web.store_token \u2014 handles domain normalization,
     # expires_at calculation, display_name extraction, and PgTokenStore
     # persistence via the shared singleton.  Lazy import avoids circular
     # dependency (oauth_web imports us lazily too).
@@ -105,25 +105,30 @@ async def check_device_login(user_id: str) -> dict[str, Any]:
     # FIX: Pass client_type="public" so that get_access_token() uses
     # PublicClientApplication (not ConfidentialClientApplication) when
     # refreshing this token.  This was the root cause of the token
-    # "evaporation" bug — Azure AD rejects refresh_token from a public
+    # "evaporation" bug \u2014 Azure AD rejects refresh_token from a public
     # client when presented by a confidential client.
     try:
         from .oauth_web import store_token
 
         await store_token(user_id, result, client_type="public")
+        # Only clean up pending flow AFTER successful persistence.
+        # Previous code deleted the flow first, which lost the token
+        # if store_token failed \u2014 forcing the user to re-authenticate.
+        del _pending_flows[user_id]
         logger.info(
             "DEVICE_CODE_PERSIST: Token saved and verified for %s", user_id
         )
     except Exception as exc:
         logger.critical(
             "DEVICE_CODE_PERSIST_FAILED: Token acquired but SAVE FAILED "
-            "for %s: %s",
+            "for %s: %s \u2014 flow preserved for retry",
             user_id,
             exc,
             exc_info=True,
         )
-        # Return success with persistence warning so user knows auth
-        # worked but the token won't survive across calls.
+        # Flow is preserved in _pending_flows so check_device_login
+        # can be called again without re-authenticating at
+        # microsoft.com/devicelogin.
         scope = result.get("scope", "")
         return {
             "status":  "success",

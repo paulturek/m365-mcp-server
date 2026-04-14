@@ -4,15 +4,16 @@ Replaces the legacy token_manager.py + token_cache.py with a
 browser-based consent redirect that stores per-user tokens.
 
 Routes (mounted at /auth):
-  GET  /auth/login?user_id=...   → redirect to Microsoft consent
-  GET  /auth/callback            → exchange code, store token
-  GET  /auth/status[?user_id=]   → check auth for one / all users
-  DELETE /auth/revoke?user_id=   → remove stored tokens
+  GET  /auth/login?user_id=...   \u2192 redirect to Microsoft consent
+  GET  /auth/callback            \u2192 exchange code, store token
+  GET  /auth/status[?user_id=]   \u2192 check auth for one / all users
+  DELETE /auth/revoke?user_id=   \u2192 remove stored tokens
 
 Public API for tool handlers:
   token = await get_access_token(user_id)
   await store_token(user_id, token_result)
 """
+import asyncio
 import os
 import time
 import secrets
@@ -44,7 +45,7 @@ REDIRECT_URI: str = os.environ.get("OAUTH_REDIRECT_URI", "")
 USER_EMAIL_DOMAIN: str = os.environ.get("USER_EMAIL_DOMAIN", "")
 
 # ---------------------------------------------------------------------------
-# Graph delegated scopes — must match those in device_code.py
+# Graph delegated scopes \u2014 must match those in device_code.py
 # ---------------------------------------------------------------------------
 SCOPES = [
     "User.Read",
@@ -65,7 +66,7 @@ TOKEN_STORE_BACKEND: str = os.environ.get("TOKEN_STORE_BACKEND", "file")  # "fil
 TOKEN_STORE_PATH: str = os.environ.get("TOKEN_STORE_PATH", "/app/data/tokens.enc")
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
 
-# CSRF: state → {"user_id": ..., "ts": ...}
+# CSRF: state \u2192 {"user_id": ..., "ts": ...}
 _auth_states: dict[str, dict] = {}
 
 # ---------------------------------------------------------------------------
@@ -126,9 +127,9 @@ def _normalize_user_id(user_id: str) -> str:
     with the canonical one.
 
     Examples (USER_EMAIL_DOMAIN=bolthousefresh.com):
-      paul.turek@bolthouse.com     → paul.turek@bolthousefresh.com
-      paul.turek@bolthousefresh.com → paul.turek@bolthousefresh.com  (no-op)
-      paul.turek@anything.com      → paul.turek@bolthousefresh.com
+      paul.turek@bolthouse.com     \u2192 paul.turek@bolthousefresh.com
+      paul.turek@bolthousefresh.com \u2192 paul.turek@bolthousefresh.com  (no-op)
+      paul.turek@anything.com      \u2192 paul.turek@bolthousefresh.com
     """
     if not USER_EMAIL_DOMAIN or "@" not in user_id:
         return user_id
@@ -138,7 +139,7 @@ def _normalize_user_id(user_id: str) -> str:
 
     if current_domain.lower() != USER_EMAIL_DOMAIN.lower():
         logger.info(
-            "Domain normalized: %s → %s", user_id, canonical
+            "Domain normalized: %s \u2192 %s", user_id, canonical
         )
     return canonical
 
@@ -158,11 +159,12 @@ async def _auto_device_code(user_id: str) -> str:
 
         # If there's already a pending flow, return the existing code
         if user_id in _pending_flows:
-            flow = _pending_flows[user_id]
-            code = flow.get("user_code", "")
-            uri = flow.get("verification_uri", "https://microsoft.com/devicelogin")
+            entry = _pending_flows[user_id]
+            flow_data = entry.get("flow", {})
+            code = flow_data.get("user_code", "")
+            uri = flow_data.get("verification_uri", "https://microsoft.com/devicelogin")
             return (
-                f"Sign-in required. Go to {uri} and enter code {code} — "
+                f"Sign-in required. Go to {uri} and enter code {code} \u2014 "
                 f"then retry your request."
             )
 
@@ -242,7 +244,9 @@ async def get_access_token(user_id: str) -> str:
     # to "confidential" (backward compatible with web-flow tokens).
     client_type = cache.get("client_type", "confidential")
     app = _get_msal_app_for_refresh(client_type)
-    result = app.acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
+    result = await asyncio.to_thread(
+        app.acquire_token_by_refresh_token, refresh_token, scopes=SCOPES
+    )
 
     if "access_token" not in result:
         error_desc = result.get("error_description", "unknown")
@@ -255,7 +259,7 @@ async def get_access_token(user_id: str) -> str:
         # destroyed the token even on transient failures.  The token
         # is preserved so the user can re-auth without losing the row.
         logger.warning(
-            "TOKEN_REFRESH_FAILED for %s — starting device code flow "
+            "TOKEN_REFRESH_FAILED for %s \u2014 starting device code flow "
             "(token preserved in DB for diagnostics)",
             user_id,
         )
@@ -375,7 +379,7 @@ async def login(
 
 @router.get("/callback")
 async def callback(request: Request):
-    """Handle the OAuth redirect from Microsoft — exchange code for tokens."""
+    """Handle the OAuth redirect from Microsoft \u2014 exchange code for tokens."""
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     error = request.query_params.get("error")
@@ -422,7 +426,7 @@ async def callback(request: Request):
 
     return HTMLResponse(f"""
     <!DOCTYPE html>
-    <html><head><title>M365 MCP — Authorised</title>
+    <html><head><title>M365 MCP \u2014 Authorised</title>
     <style>body{{font-family:system-ui;max-width:480px;margin:60px auto;text-align:center}}</style>
     </head><body>
         <h2>&#9989; Authorised</h2>
