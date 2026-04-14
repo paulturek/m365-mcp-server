@@ -57,6 +57,7 @@ SERVER_VERSION = "2.1.0"
 # ---------------------------------------------------------------------------
 MCP_BEARER_TOKEN = os.environ.get("MCP_BEARER_TOKEN", "")
 
+
 def _verify_mcp_bearer(request: Request) -> None:
     """Enforce MCP_BEARER_TOKEN on POST /mcp if configured."""
     if not MCP_BEARER_TOKEN:
@@ -66,6 +67,7 @@ def _verify_mcp_bearer(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     if auth_header[7:] != MCP_BEARER_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid Bearer token")
+
 
 # ---------------------------------------------------------------------------
 # Startup banner
@@ -81,6 +83,7 @@ def _log_startup_banner():
     logger.info("Token store:  %s", token_backend)
     logger.info("Tool list:    %s", ", ".join(t["name"] for t in TOOL_REGISTRY))
     logger.info("=" * 60)
+
 
 # ---------------------------------------------------------------------------
 # Lifespan (replaces deprecated @app.on_event)
@@ -110,6 +113,7 @@ async def lifespan(app: FastAPI):
         await store.close()
         logger.info("Token store closed")
 
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -132,14 +136,17 @@ app.add_middleware(
 # Mount auth routes: /auth/login, /auth/callback, /auth/status, /auth/revoke
 app.include_router(auth_router)
 
+
 # ---------------------------------------------------------------------------
 # MCP JSON-RPC 2.0 dispatcher
 # ---------------------------------------------------------------------------
 def _jsonrpc_ok(result: Any, req_id: Any) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
+
 def _jsonrpc_error(code: int, message: str, req_id: Any = None) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
 
 async def _handle_initialize(params: dict) -> dict:
     return {
@@ -148,8 +155,10 @@ async def _handle_initialize(params: dict) -> dict:
         "capabilities": {"tools": {"listChanged": False}},
     }
 
+
 async def _handle_tools_list(params: dict) -> dict:
     return {"tools": TOOL_REGISTRY}
+
 
 async def _handle_tools_call(params: dict) -> dict:
     tool_name = params.get("name", "")
@@ -193,8 +202,10 @@ async def _handle_tools_call(params: dict) -> dict:
             "isError": True,
         }
 
+
 async def _handle_ping(params: dict) -> dict:
     return {}
+
 
 # Method dispatch table
 _MCP_METHODS = {
@@ -210,6 +221,7 @@ _MCP_NOTIFICATIONS = {
     "notifications/cancelled",
     "notifications/progress",
 }
+
 
 @app.post("/mcp")
 async def mcp_handler(request: Request):
@@ -245,6 +257,7 @@ async def mcp_handler(request: Request):
     result = await handler(params)
     return JSONResponse(_jsonrpc_ok(result, req_id))
 
+
 @app.get("/mcp")
 async def mcp_info():
     """Server info + full tool manifest."""
@@ -261,6 +274,7 @@ async def mcp_info():
         },
     }
 
+
 @app.get("/health")
 async def health():
     return {
@@ -269,6 +283,7 @@ async def health():
         "version": SERVER_VERSION,
         "tools_loaded": len(TOOL_REGISTRY),
     }
+
 
 # ---------------------------------------------------------------------------
 # Entrypoint
@@ -280,31 +295,31 @@ def main():
         host="0.0.0.0",
         port=port,
         log_level=os.environ.get("LOG_LEVEL", "info").lower(),
-        # Force all Uvicorn + app logs to stdout so container log
-        # collectors map severity correctly (stderr = "error" by default).
         log_config={
             "version": 1,
             "disable_existing_loggers": False,
             "formatters": {
                 "default": {
-                    "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                    "()": "uvicorn.logging.DefaultFormatter",
+                    "fmt": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
                     "datefmt": "%Y-%m-%d %H:%M:%S",
                 },
                 "access": {
-                    "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                    "()": "uvicorn.logging.AccessFormatter",
+                    "fmt": '%(asctime)s | %(levelname)-8s | uvicorn.access | %(client_addr)s - "%(request_line)s" %(status_code)s',
                     "datefmt": "%Y-%m-%d %H:%M:%S",
                 },
             },
             "handlers": {
                 "default": {
+                    "formatter": "default",
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stdout",
-                    "formatter": "default",
                 },
                 "access": {
+                    "formatter": "access",
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stdout",
-                    "formatter": "access",
                 },
             },
             "loggers": {
