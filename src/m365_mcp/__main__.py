@@ -1,4 +1,4 @@
-"""M365 MCP Server \u2014 FastAPI + MCP JSON-RPC 2.0 dispatcher.
+"""M365 MCP Server — FastAPI + MCP JSON-RPC 2.0 dispatcher.
 
 v2.1.0: Multi-user OAuth, modular tool registry.
 
@@ -8,10 +8,10 @@ Token storage is pluggable: file (Option A) or PostgreSQL (Option B)
 via TOKEN_STORE_BACKEND env var.
 
 Endpoints:
-  POST /mcp          \u2014 MCP JSON-RPC 2.0 handler
-  GET  /mcp          \u2014 Server info + tool manifest
-  GET  /health       \u2014 Health check
-  /auth/*            \u2014 OAuth login, callback, status, revoke
+  POST /mcp          — MCP JSON-RPC 2.0 handler
+  GET  /mcp          — Server info + tool manifest
+  GET  /health       — Health check
+  /auth/*            — OAuth login, callback, status, revoke
 """
 
 import os
@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
 
     # Eagerly initialize the token store backend.
     # For PgTokenStore this creates the connection pool and ensures
-    # the table exists \u2014 so the first auth request doesn't pay
+    # the table exists — so the first auth request doesn't pay
     # that cost and any DB connectivity issues surface immediately.
     from .auth.oauth_web import _get_store
 
@@ -237,12 +237,12 @@ async def mcp_handler(request: Request):
     params = body.get("params", {})
     req_id = body.get("id")
 
-    # JSON-RPC notifications (no id) \u2014 accept silently
+    # JSON-RPC notifications (no id) — accept silently
     if req_id is None and method in _MCP_NOTIFICATIONS:
         logger.debug("Notification received: %s", method)
         return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
 
-    # Any other notification without id \u2014 accept silently
+    # Any other notification without id — accept silently
     if req_id is None and method not in _MCP_METHODS:
         logger.debug("Unknown notification ignored: %s", method)
         return JSONResponse({"jsonrpc": "2.0"}, status_code=202)
@@ -295,6 +295,40 @@ def main():
         host="0.0.0.0",
         port=port,
         log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        log_config={
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "()": "uvicorn.logging.DefaultFormatter",
+                    "fmt": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                },
+                "access": {
+                    "()": "uvicorn.logging.AccessFormatter",
+                    "fmt": '%(asctime)s | %(levelname)-8s | uvicorn.access | %(client_addr)s - "%(request_line)s" %(status_code)s',
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                },
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+                "access": {
+                    "formatter": "access",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+            },
+            "loggers": {
+                "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+            },
+            "root": {"handlers": ["default"], "level": "INFO"},
+        },
     )
 
 
