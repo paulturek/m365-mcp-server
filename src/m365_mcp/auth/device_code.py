@@ -10,6 +10,7 @@ import msal
 logger = logging.getLogger("m365_mcp")
 
 GRAPH_SCOPES = [
+    "offline_access",
     "User.Read",
     "User.ReadBasic.All",
     "Mail.ReadWrite",

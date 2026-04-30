@@ -48,6 +48,7 @@ USER_EMAIL_DOMAIN: str = os.environ.get("USER_EMAIL_DOMAIN", "")
 # Graph delegated scopes \u2014 must match those in device_code.py
 # ---------------------------------------------------------------------------
 SCOPES = [
+    "offline_access",
     "User.Read",
     "User.ReadBasic.All",
     "Mail.ReadWrite",
@@ -228,8 +229,8 @@ async def get_access_token(user_id: str) -> str:
         detail = await _auto_device_code(user_id)
         raise HTTPException(status_code=401, detail=detail)
 
-    # Still valid (5-min safety margin)?
-    if cache.get("expires_at", 0) > time.time() + 300:
+    # Still valid (10-min safety margin)?
+    if cache.get("expires_at", 0) > time.time() + 600:
         return cache["access_token"]
 
     # --- Refresh ---
@@ -275,9 +276,10 @@ async def get_access_token(user_id: str) -> str:
         "authorized_at": cache.get("authorized_at", time.time()),
         "client_type": client_type,  # Preserve client_type through refresh
         "last_refreshed": time.time(),
+        "refresh_count": cache.get("refresh_count", 0) + 1,
     }
     await store.save(user_id, updated)
-    logger.info("Token refreshed for %s (client_type=%s)", user_id, client_type)
+    logger.info("Token refreshed for %s (client_type=%s, refresh_count=%d)", user_id, client_type, updated["refresh_count"])
     return updated["access_token"]
 
 
@@ -321,6 +323,7 @@ async def store_token(
         "authorized_at": time.time(),
         "client_type": client_type,
         "last_refreshed": time.time(),
+        "refresh_count": 0,
     }
 
     store = _get_store()
