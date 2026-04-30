@@ -66,6 +66,7 @@ class M365Config:
     # Microsoft Graph API scopes (delegated permissions)
     # Must match auth/oauth_web.py SCOPES and auth/device_code.py GRAPH_SCOPES
     graph_scopes: list[str] = field(default_factory=lambda: [
+        "offline_access",
         "User.Read",
         "User.ReadBasic.All",
         "Mail.ReadWrite",
